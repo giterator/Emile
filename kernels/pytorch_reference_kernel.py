@@ -1,16 +1,3 @@
-"""
-PyTorch reference attention -- the baseline the Triton agent must beat.
-
-This is a plain PyTorch implementation of scaled dot-product attention
-using explicit matmul + softmax. It runs correctly on CUDA but is not
-memory-fused: it materialises the full N x N attention matrix in HBM and
-makes three separate passes (QK matmul, softmax, AV matmul), operating far
-below the A100 memory bandwidth ceiling.
-
-The agent's task: write a fused Triton kernel (FlashAttention-style) that
-beats this reference in TFLOPS by processing Q/K/V in tiles and keeping
-the running softmax statistics in SRAM instead of spilling them to HBM.
-"""
 import math
 import torch
 
@@ -23,16 +10,10 @@ def attention_kernel(
     scale: float = None,
 ) -> torch.Tensor:
     """
-    Scaled dot-product attention in pure PyTorch (unfused reference baseline).
+    Scaled dot-product attention in pure PyTorch (baseline).
 
     q, k, v : (B, H, N, D) float16 on CUDA
     returns  : (B, H, N, D) float16
-
-    Performance characteristics:
-    - Three separate HBM passes (QK^T matmul, softmax, AV matmul)
-    - Full N x N attention matrix materialised in HBM
-    - Memory-bandwidth limited at all practical sequence lengths
-    - Typical throughput: 1-5 TFLOPS on A100 for standard transformer shapes
 
     This is the correctness oracle AND the performance floor. Any Triton
     kernel that passes the correctness check and exceeds these TFLOPS wins.
