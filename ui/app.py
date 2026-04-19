@@ -188,10 +188,9 @@ def _init_state():
         "baseline_metrics": None,
         "tflops_history":   [],
         "demo_running":     False,
-        "triton_text":      "",
-        "triton_tps":       0.0,
-        "triton_ttft":      0.0,
-        "race_event":       None,
+        "baseline_rec":     None,
+        "triton_rec":       None,
+        "race_replay":      None,
         "demo_done":        False,
         "demo_phase":       "idle",
     }
@@ -334,11 +333,11 @@ def _build_state(page: str, config: dict) -> dict:
         "baseline_metrics": st.session_state.baseline_metrics,
         "best_metrics":     st.session_state.best_metrics,
         "tflops_history":   list(st.session_state.tflops_history),
-        "race_event":       st.session_state.race_event,
-        "triton_text":      st.session_state.triton_text,
-        "triton_tps":       st.session_state.triton_tps,
-        "triton_ttft":      st.session_state.triton_ttft,
+        "baseline_rec":     st.session_state.baseline_rec,
+        "triton_rec":       st.session_state.triton_rec,
+        "race_replay":      st.session_state.race_replay,
         "demo_phase":       st.session_state.demo_phase,
+        "demo_done":        st.session_state.demo_done,
     }
 
 
@@ -384,7 +383,7 @@ with tab_agent:
         kernel_editor = st.text_area(
             label="kernel_code",
             value=V1_KERNEL,
-            height=340,
+            height=720,
             label_visibility="collapsed",
         )
 
@@ -547,9 +546,10 @@ with tab_demo:
 
     if demo_btn:
         st.session_state.demo_running = True
-        st.session_state.triton_text  = ""
+        st.session_state.baseline_rec = None
+        st.session_state.triton_rec   = None
+        st.session_state.race_replay  = None
         st.session_state.demo_done    = False
-        st.session_state.race_event   = None
         st.session_state.demo_phase   = "loading"
 
         import modal
@@ -566,20 +566,27 @@ with tab_demo:
             if phase == "loading":
                 st.session_state.demo_phase = "loading"
 
-            elif phase == "kernel_race_done":
-                st.session_state.race_event = event
-                st.session_state.demo_phase = "generating"
+            elif phase == "recording_start":
+                side = event.get("side", "")
+                st.session_state.demo_phase = f"recording_{side}"
 
-            elif phase == "triton_token":
-                st.session_state.triton_text += event["token"]
-                st.session_state.triton_tps   = event.get("tokens_per_sec", 0.0)
-                st.session_state.demo_phase   = "generating"
+            elif phase == "recording_done":
+                side = event.get("side", "")
+                rec = {k: v for k, v in event.items() if k not in ("phase", "side")}
+                if side == "baseline":
+                    st.session_state.baseline_rec = rec
+                elif side == "triton":
+                    st.session_state.triton_rec = rec
 
-            elif phase == "triton_done":
-                st.session_state.triton_tps  = event.get("tokens_per_sec", 0.0)
-                st.session_state.triton_ttft = event.get("ttft_ms", 0.0)
-                st.session_state.demo_phase  = "complete"
-                st.session_state.demo_done   = True
+            elif phase == "race_replay":
+                st.session_state.race_replay = {
+                    "baseline":     event.get("baseline"),
+                    "triton":       event.get("triton"),
+                    "speedup_ttft": event.get("speedup_ttft"),
+                    "speedup_tps":  event.get("speedup_tps"),
+                }
+                st.session_state.demo_phase = "complete"
+                st.session_state.demo_done  = True
 
             elif phase == "error":
                 st.session_state.demo_phase = "error"

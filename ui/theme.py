@@ -102,15 +102,9 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 
-/* Parisian bistro tile texture, ~4% opacity, inline data-URL diamond lattice. */
-body {
-  background-image:
-    repeating-linear-gradient( 45deg, rgba(244,236,216,0.04) 0 1px, transparent 1px 28px),
-    repeating-linear-gradient(-45deg, rgba(244,236,216,0.04) 0 1px, transparent 1px 28px),
-    radial-gradient(1200px 600px at 20% -10%, rgba(201,123,74,0.08), transparent 60%),
-    radial-gradient(900px  500px at 110% 110%, rgba(232,177,74,0.05), transparent 60%);
-  background-attachment: fixed;
-}
+/* Iframe body is transparent; the host Streamlit page owns the texture
+   so it reads as one continuous surface across the whole UI. */
+body { background: transparent; }
 
 h1, h2, h3 {
   font-family: var(--serif);
@@ -436,12 +430,25 @@ footer { display: none !important; }
 div[data-testid="stToolbar"] { display: none !important; }
 div[data-testid="stDecoration"] { display: none !important; }
 
-/* App background */
+/* App background — Parisian bistro tile texture on the host so the whole
+   UI (header + iframes) shares one continuous surface. */
 html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-  background: #1A0F0B !important;
+  background-color: #1A0F0B !important;
   color: #F4ECD8 !important;
   font-family: 'Inter', ui-sans-serif, system-ui, sans-serif !important;
 }
+[data-testid="stAppViewContainer"] {
+  background-image:
+    repeating-linear-gradient( 45deg, rgba(244,236,216,0.035) 0 1px, transparent 1px 28px),
+    repeating-linear-gradient(-45deg, rgba(244,236,216,0.035) 0 1px, transparent 1px 28px),
+    radial-gradient(1200px 600px at 20% -10%, rgba(201,123,74,0.08), transparent 60%),
+    radial-gradient(900px  500px at 110% 110%, rgba(232,177,74,0.05), transparent 60%) !important;
+  background-attachment: fixed !important;
+}
+/* Streamlit iframes get a transparent background so the host texture shows through */
+iframe[title="streamlit_app.components.v1.html.html"],
+iframe[title^="st."],
+.stCustomComponent iframe { background: transparent !important; }
 [data-testid="stSidebar"] {
   background: #0E0706 !important;
   border-right: 1px solid #3A2E28 !important;

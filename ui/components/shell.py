@@ -159,32 +159,9 @@ def _agent_page(state: dict) -> str:
 
 def _demo_page(state: dict) -> str:
     race_html = _safe_render("race", state)
-    triton_text = escape(state.get("triton_text") or "")
-    tps = state.get("triton_tps") or 0.0
-    ttft = state.get("triton_ttft") or 0.0
-
-    try:
-        tps_fmt = f"{float(tps):.1f}"
-    except Exception:  # noqa: BLE001
-        tps_fmt = str(tps)
-    try:
-        ttft_fmt = f"{float(ttft)*1000:.0f} ms" if float(ttft) < 10 else f"{float(ttft):.0f} ms"
-    except Exception:  # noqa: BLE001
-        ttft_fmt = str(ttft)
-
     return f"""
 {_brand_bar('demo', state)}
-<section style="margin-bottom:1rem;">{race_html}</section>
-<section class="em-card">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap;">
-    <h3 style="margin:0;">Triton stream</h3>
-    <div style="display:flex;gap:0.4rem;">
-      <span class="em-chip saffron">{tps_fmt} tok/s</span>
-      <span class="em-chip copper">TTFT {ttft_fmt}</span>
-    </div>
-  </div>
-  <pre class="em-mono" style="margin:0;padding:1rem;background:var(--ink);border:1px solid var(--steel-2);border-radius:10px;max-height:360px;overflow:auto;white-space:pre-wrap;color:var(--parchment);">{triton_text}</pre>
-</section>
+<section>{race_html}</section>
 """.strip()
 
 
