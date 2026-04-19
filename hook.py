@@ -46,6 +46,20 @@ def load_best_kernel(kernel_code: str) -> None:
     print("[hook] Optimized kernel loaded successfully.")
 
 
+def _is_causal_mask(mask, q_len: int) -> bool:
+    """
+    Returns True if mask is a standard additive causal mask
+    (0 in lower triangle, large-negative in upper triangle).
+    transformers 4.51+ passes this instead of is_causal=True.
+    """
+    if mask is None or q_len < 2:
+        return False
+    try:
+        return bool((mask[..., 0, -1] < -1e4).all())
+    except Exception:
+        return False
+
+
 def _triton_sdpa(
     query:    torch.Tensor,
     key:      torch.Tensor,
@@ -60,32 +74,35 @@ def _triton_sdpa(
     Falls back to the original SDPA for unsupported shapes.
     """
     if _optimized_kernel is None:
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
     B, H_q, N, D = query.shape
-    H_kv = key.shape[1]
 
-    # Only handle fp16, supported head dims, no attention mask, no dropout
+    # transformers passes an explicit additive causal mask instead of is_causal=True.
+    # Detect and convert it so the Triton kernel can handle causality natively.
+    if _is_causal_mask(attn_mask, N):
+        is_causal = True
+        attn_mask = None
+
+    # Only handle prefill (N >= 64): decode steps (N=1) fall back to PyTorch SDPA.
+    # Also restrict to fp16, supported head dims, no non-causal mask, no dropout.
     if (
         query.dtype != torch.float16
         or D not in (64, 128)
         or dropout_p > 0.0
         or attn_mask is not None
+        or N < 64
         or N > 8192
     ):
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
-    # GQA → expand KV heads to match Q heads so the MHA kernel sees uniform shapes
-    if H_kv != H_q:
-        n_rep = H_q // H_kv
-        key   = key.repeat_interleave(n_rep, dim=1)
-        value = value.repeat_interleave(n_rep, dim=1)
-
+    # transformers already expands KV heads before calling SDPA, so no GQA
+    # expansion is needed here — H_q == H_kv by the time we see the tensors.
     try:
         return _optimized_kernel(query, key, value, is_causal=is_causal, scale=scale)
     except Exception:
         # Never crash the model — silently fall back
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
 
 def patch_attention() -> None:

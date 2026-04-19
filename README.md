@@ -1,8 +1,9 @@
 # GPU Kernel Optimization Agent
 
-Autonomous AI agent that iteratively rewrites a Triton attention kernel to maximize
-hardware utilization on an A100-80GB, then hooks the optimized kernel into Qwen3-4B
-to show real inference speedup — live, in a side-by-side streaming UI.
+Autonomous AI agent that writes and iteratively improves a Triton attention kernel,
+starting from a plain PyTorch reference implementation as the performance baseline.
+The goal: beat the PyTorch reference in TFLOPS on an A100-80GB. The best kernel is
+then hooked into Qwen3-4B to show real inference speedup in a side-by-side streaming UI.
 
 ## Architecture
 
@@ -13,7 +14,7 @@ Streamlit UI
     │     Motus harness  ◄──────────────────────────────────────────┐
     │          │   (retrieves past winning strategies as context)    │
     │          ▼                                                     │
-    │     Claude 3.5 Sonnet (tool-calling loop)                     │
+    │     LLM agent (generate-then-profile loop)                    │
     │          └─ profile_kernel() ──► Modal A100                   │
     │                                      Triton bench → metrics   │
     │          optimization trace logged ──────────────────────────►┘
@@ -104,36 +105,38 @@ streamlit run ui/app.py
 
 ```
 kernel-optimizer/
-├── modal_app.py          # A100 GPU functions (profiling + inference)
-├── agent.py              # Claude tool-calling optimization loop
-├── hook.py               # SDPA monkey-patch for Qwen3-4B
+├── modal_app.py                      # A100 GPU functions (profiling + inference)
+├── agent.py                          # LLM optimization loop
+├── hook.py                           # SDPA monkey-patch for Qwen3-4B
 ├── kernels/
-│   ├── reference.py        # PyTorch correctness oracle
-│   ├── fa2_official.py     # Baseline: Triton's official FA2 (A100 pointer path)
-│   └── v1_naive_triton.py  # Archived naive kernel (kept for reference)
+│   ├── reference.py                  # PyTorch correctness oracle (used inside Modal)
+│   ├── pytorch_reference_kernel.py   # Baseline: unfused PyTorch attention (agent's starting point)
+│   ├── v1_naive_triton.py            # Archived naive Triton kernel (kept for reference)
+│   └── v2_causal.py                  # Archived causal Triton variant (kept for reference)
 ├── prompts/
-│   └── optimizer.py      # System prompt + tool schemas
+│   └── optimizer.py                  # System prompt + tool schemas
 ├── ui/
-│   └── app.py            # Streamlit UI
+│   └── app.py                        # Streamlit UI
 └── requirements.txt
 ```
 
 ## How the agent works
 
-1. **Baseline profile** — Official Triton FA2 kernel (A100 pointer path) profiled on A100
+1. **Baseline profile** — PyTorch reference kernel (unfused matmul + softmax) profiled on A100
 2. **Diagnosis** — LLM reads TFLOPS, bandwidth, arithmetic intensity, bound type
-3. **Rewrite** — LLM generates improved kernel (better block tiles, warps, pipeline depth)
-4. **Verify** — Modal execs the new code, checks correctness vs PyTorch reference
-5. **Iterate** — Loop until efficiency target or max iterations hit
+3. **Write** — LLM writes a fused Triton kernel (FlashAttention-style tiling, online softmax)
+4. **Verify** — Modal executes the new code, checks correctness vs PyTorch reference
+5. **Iterate** — LLM improves the Triton kernel based on profiling feedback; loop until efficiency target or max iterations hit
 6. **Hook** — Best kernel patched into Qwen3-4B via SDPA override for inference demo
 
 ## Expected performance
 
-| Kernel | TFLOPS | vs A100 peak | Speedup |
-|--------|--------|--------------|---------|
-| Triton official FA2 (autotuned) | ~10-18 | ~3-6% | 1× baseline |
-| Agent-optimized (tuned for Qwen3 shapes) | ~18-30 | ~6-10% | ~1.5-2× |
+| Kernel | TFLOPS | vs A100 peak | Speedup vs baseline |
+|--------|--------|--------------|---------------------|
+| PyTorch reference (unfused matmul+softmax) | ~1-5 | ~0.3-1.6% | 1× baseline |
+| Agent Triton v1 (basic tiling) | ~8-15 | ~2.5-5% | ~3-5× |
+| Agent Triton best (tuned for Qwen3 shapes) | ~15-30 | ~5-10% | ~5-10× |
 
-*Attention is memory-bound at all practical sequence lengths — the roofline ceiling
-for attention is ~20 TFLOPS, not 312. Reaching 20+ TFLOPS matches FlashAttention-2
-on A100 and is the hackathon target.*
+*Attention is memory-bound at all practical sequence lengths. The PyTorch reference
+makes three separate HBM passes; a fused Triton kernel reduces this to one pass,
+yielding a substantial TFLOPS improvement even without exotic optimizations.*
