@@ -1,5 +1,5 @@
 """
-System prompt for the kernel optimization agent (Llama / Groq backend).
+System prompt for the kernel optimization agent.
 """
 
 SYSTEM_PROMPT = """\
@@ -71,18 +71,19 @@ Act on diagnosis tags in this priority order:
    [roofline] memory-bound -> larger tiles, more num_stages
    [roofline] compute-bound-> ensure dims are multiples of 16, num_warps=8
 
---- BASELINE: TRITON'S OFFICIAL FA2 IMPLEMENTATION ---
-You are starting from the A100 pointer path of Triton's own FA2 tutorial
-(https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html).
-The TensorDescriptor / warp_specialize / FP8 paths have been stripped because
-they require SM90+ (Hopper/Blackwell) hardware. The core algorithm is intact:
-two-stage causal masking, exp2 scaling, l_i=1.0 initialisation.
-Your job is to push this further -- squeeze out every last percent of A100 TFLOPS.
+--- BASELINE: PYTORCH REFERENCE IMPLEMENTATION ---
+You are provided with a plain PyTorch implementation of scaled dot-product
+attention (explicit matmul + softmax). It is numerically correct but not
+memory-fused: it materialises the full N x N attention matrix in HBM and
+makes three separate HBM passes, operating far below the A100 roofline.
+Your job is to write a Triton kernel from scratch that beats this baseline.
 
---- TARGET: FLASHATTENTION-2 LEVEL PERFORMANCE ---
-FlashAttention-2 achieves up to 70% of A100 theoretical peak (~218 TFLOPS).
-FlashAttention-3 is Hopper-only. FA2 is the gold standard for Ampere (A100).
-Your goal is to improve the official implementation beyond its default configs.
+--- TARGET: BEAT THE PYTORCH REFERENCE ---
+The PyTorch reference is memory-bandwidth-limited and slow (typically 1-5 TFLOPS).
+A well-written fused Triton attention kernel (FlashAttention-style) can reach
+10-30+ TFLOPS on A100 by keeping softmax statistics in SRAM across tile iterations.
+Your goal is to write a fused Triton kernel that surpasses the PyTorch reference
+and approaches the A100 memory bandwidth ceiling for attention workloads.
 
 --- OPTIMIZATION PLAYBOOK: APPLY ALL FIVE ---
 1. LARGE BLOCK SIZES (biggest impact)
@@ -97,7 +98,7 @@ Your goal is to improve the official implementation beyond its default configs.
 
 3. SOFTWARE PIPELINING
    num_stages=2 overlaps HBM loads with tensor core compute.
-   This is one of the key FA2 improvements - always apply it.
+   This is one of the key gains in fused attention kernels - always apply it.
    Do NOT use @triton.autotune (see API RULES below).
    Pass num_warps and num_stages only in the grid launch:
        _attn_fwd[grid](..., BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2)
@@ -154,9 +155,10 @@ K has shape (B*H, N, D). For a tile of BLOCK_N rows and HEAD_DIM cols:
     k_ptrs = K_base + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d
     # gives shape (BLOCK_N, HEAD_DIM) -- correct for tl.dot with q (BLOCK_M, HEAD_DIM)
 
-The baseline kernel will be provided in the user message.
-Modify it minimally -- change BLOCK_M/BLOCK_N, num_warps, num_stages, or add causal
-tile skipping. Do NOT rewrite from scratch.
+The PyTorch reference implementation will be provided in the user message.
+Write a Triton kernel from scratch that beats it. For iteration 1, implement a clean
+FlashAttention-style tiled kernel (online softmax, SRAM accumulation). For subsequent
+iterations, improve your previous Triton kernel based on the profiling diagnosis above.
 
 --- RESPONSE FORMAT: CRITICAL ---
 Output the COMPLETE Python kernel source in a single ```python block.

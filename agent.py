@@ -240,9 +240,9 @@ def _build_initial_message(kernel_code: str, baseline_metrics: dict, config: dic
     motus_block = f"\n{motus_ctx}\n" if motus_ctx else ""
 
     return f"""\
-Your task: improve the Triton attention kernel below for an A100-80GB GPU.
+Your task: write a Triton attention kernel that beats the PyTorch reference below.
 {motus_block}
-## Baseline kernel (this code runs correctly and scores {baseline_metrics.get('tflops', '?'):.1f} TFLOPS)
+## PyTorch reference baseline (scores {baseline_metrics.get('tflops', '?'):.1f} TFLOPS -- your Triton kernel must exceed this)
 
 ```python
 {kernel_code}
@@ -254,10 +254,11 @@ Your task: improve the Triton attention kernel below for an A100-80GB GPU.
 
 {_diagnose(baseline_metrics)}
 
-Modify the baseline kernel above to improve performance. Output the full modified source.
-Do NOT rewrite from scratch -- start from the working code above and change only what helps.
-Safe modifications: BLOCK_M, BLOCK_N values; num_warps; num_stages; adding explicit
-two-stage causal tile skipping (skip tiles where start_n + BLOCK_N <= off_m * BLOCK_M entirely).
+Write a Triton kernel from scratch that beats the PyTorch reference above.
+Implement the FlashAttention-style tiled algorithm: process Q/K/V in BLOCK_M x BLOCK_N tiles,
+maintain running max (m_i) and normaliser (l_i) for online softmax, accumulate output in SRAM.
+This fuses the three HBM passes of the PyTorch reference into one, dramatically reducing
+memory traffic and raising TFLOPS.
 
 Rules:
 - Output ONLY the complete Python source in a single ```python block.
@@ -266,22 +267,21 @@ Rules:
   For tiles where start_n + BLOCK_N <= start_m * BLOCK_M: skip entirely (causal means token i only attends to j<=i).
   For the last partial tile: apply mask qk = tl.where(offs_n[None,:] <= offs_m[:,None], qk, float("-inf"))
 - Do NOT add import statements (torch, triton, tl, math are already in scope).
-- Do NOT use tl.ones() — it does not exist in Triton 2.3. Use tl.full([N], 1.0, dtype=tl.float32) instead.
+- Do NOT use tl.ones() -- it does not exist in Triton 2.3. Use tl.full([N], 1.0, dtype=tl.float32) instead.
 - Do NOT use @triton.autotune. It causes too many crash patterns. Use fixed block sizes instead.
   Declare BLOCK_M and BLOCK_N as tl.constexpr in the @triton.jit kernel signature,
   then pass them in the grid launch along with num_warps and num_stages:
     RIGHT: _attn_fwd[grid](..., BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2)
-- num_warps and num_stages are JIT meta-parameters — NEVER declare them in the @triton.jit
+- num_warps and num_stages are JIT meta-parameters -- NEVER declare them in the @triton.jit
   kernel signature. They are consumed by the Triton runtime, not passed into the kernel.
   If you put them in the signature you get "missing a required argument: num_warps".
   WRONG: def _attn_fwd(..., num_warps: tl.constexpr, num_stages: tl.constexpr):
   RIGHT: def _attn_fwd(..., BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
 - Use BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2 as your starting point.
 - Use only ASCII characters in strings and comments (no em dashes, arrows, or Unicode).
-- Keep the kernel concise — aim for under 130 lines total. No verbose docstrings or long comments.
+- Keep the kernel concise -- aim for under 130 lines total. No verbose docstrings or long comments.
 
 Target: {EFFICIENCY_TARGET_PCT}% compute efficiency ({EFFICIENCY_TARGET_PCT/100*312:.0f} TFLOPS).
-FlashAttention-2 ceiling: ~70% (~218 TFLOPS) on A100.
 """
 
 

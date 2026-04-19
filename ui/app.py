@@ -118,11 +118,11 @@ _init_state()
 # ---------------------------------------------------------------------------
 
 @st.cache_data
-def _load_v1_kernel() -> str:
-    p = Path(__file__).parent.parent / "kernels" / "fa2_official.py"
+def _load_reference_kernel() -> str:
+    p = Path(__file__).parent.parent / "kernels" / "pytorch_reference_kernel.py"
     return p.read_text()
 
-V1_KERNEL = _load_v1_kernel()
+V1_KERNEL = _load_reference_kernel()
 
 # ---------------------------------------------------------------------------
 # Header
@@ -131,7 +131,7 @@ V1_KERNEL = _load_v1_kernel()
 st.markdown(
     "## ⚡ GPU Kernel Optimization Agent  "
     "<span style='font-size:0.55em;color:#6c7086;font-weight:400'>"
-    "Qwen3-4B · A100-80GB · FA2 baseline + Llama agent</span>",
+    "Qwen3-4B · A100-80GB · PyTorch reference baseline + LLM agent</span>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -148,9 +148,9 @@ with tab_agent:
 
     with col_controls:
         st.markdown(
-            "#### Starting Kernel  "
+            "#### Reference Baseline  "
             "<span style='font-size:0.78em;color:#6c7086;font-weight:400'>"
-            "Triton's official FA2 implementation (A100 pointer path) — agent optimises from here</span>",
+            "PyTorch reference implementation — agent writes a Triton kernel to beat this</span>",
             unsafe_allow_html=True,
         )
         kernel_editor = st.text_area(
@@ -169,7 +169,7 @@ with tab_agent:
 
         target_pct = st.slider(
             "Efficiency target (%)", 1.0, 100.0, 70.0, 0.5,
-            help="Stop when compute efficiency exceeds this % of A100 peak. FlashAttention-2 reaches up to 70% on A100.",
+            help="Stop when the Triton kernel's compute efficiency exceeds this % of A100 peak (312 TFLOPS).",
         )
         max_iter = st.slider("Max iterations", 2, 8, 5)
 
