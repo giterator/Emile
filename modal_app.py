@@ -474,8 +474,11 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
     Side-by-side Qwen3-4B inference race.
 
     Records two full generations on the GPU (sequential, so timings are honest):
-      1. Baseline  - stock PyTorch SDPA, no hooks.
-      2. Triton    - SDPA monkey-patched to dispatch to the agent's kernel for prefill.
+      1. Baseline  - model loaded with attn_implementation="eager" (naive
+                     matmul + softmax + matmul, no fused kernels).
+      2. Triton    - same eager model; HF's eager_attention_forward monkey-patched
+                     to dispatch prefill through the agent's Triton kernel and
+                     fall back to eager for decode steps.
     Both runs use the same prompt, weights, and greedy decoding.
 
     Yields:
@@ -496,13 +499,15 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
     import queue as _queue
 
     import torch
-    import torch.nn.functional as F
-    import triton
+    import triton  # noqa: F401  (kernel module needs it imported in the env)
     from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
     yield {"phase": "loading"}
 
-    # ── Load model ────────────────────────────────────────────────────────────
+    # ── Load model in EAGER mode ─────────────────────────────────────────────
+    # Both runs use attn_implementation="eager" so the baseline is literally
+    # `matmul + softmax + matmul` inside the Qwen3 forward. For the Triton run
+    # we monkey-patch HF's eager_attention_forward to dispatch to the kernel.
     try:
         cache_dir  = MODEL_CACHE_DIR
         local_only = os.path.isdir(os.path.join(cache_dir, "models--" + MODEL_ID.replace("/", "--")))
@@ -512,7 +517,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
             MODEL_ID,
             dtype=torch.float16,
             device_map="cuda",
-            attn_implementation="sdpa",
+            attn_implementation="eager",
             **load_kwargs,
         )
         model.eval()
@@ -542,7 +547,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
         "top_p": None,
     }
 
-    # Warm GPU once so the first timed run doesn't eat one-time setup costs
+    # Warm GPU once so first timed run doesn't eat one-time setup costs
     try:
         _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
         torch.cuda.synchronize()
@@ -550,7 +555,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
         print(f"[warmup] non-fatal: {e}")
 
     def _record_generation(label: str):
-        """Run one generation; return (tokens[(text, elapsed_ms)], ttft_ms, total_ms, tps)."""
+        """Run one generation; return tokens[(text, elapsed_ms)], ttft_ms, total_ms, tps."""
         streamer = TextIteratorStreamer(
             tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=60.0
         )
@@ -586,7 +591,10 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
             "count":    len(tokens_recorded),
         }
 
-    # ── 2a. Record baseline (stock PyTorch SDPA, no hooks) ──────────────────
+    # ── 2a. Record baseline (naive PyTorch eager: matmul + softmax + matmul) ──
+    # The model was loaded with attn_implementation="eager" so every attention
+    # layer literally runs `torch.matmul(Q, K.T) -> softmax -> matmul(P, V)`
+    # with no fused kernels. This is the honest naive reference.
     yield {"phase": "recording_start", "side": "baseline"}
     try:
         baseline_rec = _record_generation("baseline")
@@ -597,8 +605,19 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
           f"total={baseline_rec['total_ms']:.1f}ms tps={baseline_rec['tps']:.1f}")
     yield {"phase": "recording_done", "side": "baseline", **baseline_rec}
 
-    # ── 2b. Record Triton-hooked ────────────────────────────────────────────
-    _original_sdpa = F.scaled_dot_product_attention
+    # ── 2b. Record Triton-hooked (monkey-patch HF's eager_attention_forward) ─
+    # Qwen3's attention modules call `eager_attention_forward(module, q, k, v, mask, scaling, ...)`
+    # from `transformers.models.qwen3.modeling_qwen3`. We swap that function for
+    # one that routes the prefill step through our Triton kernel and falls back
+    # to the original for decode (N_q=1) and any shape the kernel can't handle.
+    try:
+        from transformers.models.qwen3 import modeling_qwen3 as _qwen3_mod
+        from transformers.models.qwen3.modeling_qwen3 import repeat_kv as _repeat_kv
+    except Exception as e:
+        yield {"phase": "error", "message": f"Failed to import Qwen3 eager module: {e}"}
+        return
+
+    _original_eager = _qwen3_mod.eager_attention_forward
     patched = False
     _hook_total    = [0]
     _hook_triton   = [0]
@@ -610,71 +629,98 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
             _triton_attn = getattr(_mod, "attention_kernel", None)
 
             if _triton_attn is not None:
-                _D = 128
-                for _n in (128, inputs["input_ids"].shape[1]):
-                    _wq = torch.randn(1, 1, _n, _D, device="cuda", dtype=torch.float16)
-                    _triton_attn(_wq, _wq, _wq, is_causal=False)
-                    _triton_attn(_wq, _wq, _wq, is_causal=True)
-                    del _wq
-                torch.cuda.synchronize()
-                print(f"[triton] Warmup OK (N=128 + N={inputs['input_ids'].shape[1]})")
-
                 _hook_failed = [False]
 
-                def _is_causal_mask(mask, q_len):
-                    if mask is None or q_len < 2:
-                        return False
-                    try:
-                        return bool((mask[..., 0, -1] < -1e4).all())
-                    except Exception:
-                        return False
-
-                def _sdpa_hook(query, key, value, attn_mask=None,
-                               dropout_p=0.0, is_causal=False, scale=None):
-                    _, _, N_q, D_q = query.shape
+                def _triton_eager_forward(module, query, key, value,
+                                          attention_mask, scaling,
+                                          dropout=0.0, **kwargs):
+                    # query:         (B, H_q,  N_q, D)
+                    # key/value:     (B, H_kv, N_kv, D)
                     _hook_total[0] += 1
-                    if _is_causal_mask(attn_mask, N_q):
-                        is_causal, attn_mask = True, None
-                    if (_hook_failed[0] or query.dtype != torch.float16
-                            or D_q not in (64, 128) or dropout_p > 0
-                            or attn_mask is not None or N_q < 64):
+                    B, H_q, N_q, D = query.shape
+                    N_kv = key.shape[2]
+
+                    # Bail to eager for:
+                    #   - decode steps (N_q != N_kv; KV-cache cross-attn shape)
+                    #   - sequences too short for BLOCK_M
+                    #   - unsupported dtype / head_dim
+                    #   - kernel previously threw
+                    if (_hook_failed[0]
+                            or query.dtype != torch.float16
+                            or D not in (64, 128)
+                            or N_q != N_kv
+                            or N_q < 64
+                            or dropout > 0):
                         _hook_fallback[0] += 1
-                        return _original_sdpa(query, key, value, attn_mask,
-                                              dropout_p, is_causal, scale=scale)
+                        return _original_eager(module, query, key, value,
+                                               attention_mask, scaling,
+                                               dropout, **kwargs)
+
                     try:
-                        out = _triton_attn(query, key, value,
-                                           is_causal=is_causal, scale=scale)
+                        # GQA: expand K/V to match Q's head count
+                        k_exp = _repeat_kv(key,   module.num_key_value_groups)
+                        v_exp = _repeat_kv(value, module.num_key_value_groups)
+
+                        # Prefill in a causal LM is always causal
+                        out = _triton_attn(query, k_exp, v_exp,
+                                           is_causal=True, scale=scaling)
                         if _hook_triton[0] == 0:
                             torch.cuda.synchronize()
                         _hook_triton[0] += 1
-                        return out
+
+                        # HF's eager returns (attn_output, attn_weights) where
+                        # attn_output has shape (B, N, H, D) after transpose.
+                        attn_output = out.transpose(1, 2).contiguous()
+                        return attn_output, None
                     except Exception as he:
                         print(f"[warn] Triton hook error: {he}")
                         _hook_failed[0] = True
                         _hook_fallback[0] += 1
-                        return _original_sdpa(query, key, value, attn_mask,
-                                              dropout_p, is_causal, scale=scale)
+                        return _original_eager(module, query, key, value,
+                                               attention_mask, scaling,
+                                               dropout, **kwargs)
 
-                F.scaled_dot_product_attention = _sdpa_hook
+                _qwen3_mod.eager_attention_forward = _triton_eager_forward
                 patched = True
         except Exception as e:
-            print(f"[warn] Kernel import failed, falling back to SDPA: {e}")
+            print(f"[warn] Kernel import failed, falling back to eager: {e}")
+
+    # Real-path warmup: with the hook patched in, run a tiny generate so Triton's
+    # JIT compile + autotune benchmarking happens BEFORE the timed run. This
+    # runs through the real HF code path so shapes (B, H_q, N, D), dtypes, and
+    # strides match the timed call exactly -- no room for warmup/real mismatches.
+    if patched:
+        try:
+            _t0 = time.perf_counter()
+            _hook_total_snap = _hook_total[0]
+            _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
+            torch.cuda.synchronize()
+            _warm_ms = (time.perf_counter() - _t0) * 1000
+            _triton_calls = _hook_triton[0] - _hook_total_snap
+            print(f"[triton] Real-path warmup: {_warm_ms:.0f}ms "
+                  f"(triton calls during warmup: {_triton_calls})")
+            # Reset counters so the timed run starts from zero
+            _hook_total[0]    = 0
+            _hook_triton[0]   = 0
+            _hook_fallback[0] = 0
+        except Exception as e:
+            print(f"[warn] Real-path warmup failed: {e}")
 
     yield {"phase": "recording_start", "side": "triton"}
     try:
         triton_rec = _record_generation("triton")
     except Exception as e:
         if patched:
-            F.scaled_dot_product_attention = _original_sdpa
+            _qwen3_mod.eager_attention_forward = _original_eager
         yield {"phase": "error", "message": f"Triton generation failed: {e}"}
         return
     finally:
         if patched:
-            F.scaled_dot_product_attention = _original_sdpa
+            _qwen3_mod.eager_attention_forward = _original_eager
 
     print(f"[triton-gen] ttft={triton_rec['ttft_ms']:.1f}ms "
           f"total={triton_rec['total_ms']:.1f}ms tps={triton_rec['tps']:.1f} | "
-          f"hooks: total={_hook_total[0]} triton={_hook_triton[0]} sdpa={_hook_fallback[0]}")
+          f"hooks: total={_hook_total[0]} triton={_hook_triton[0]} eager={_hook_fallback[0]}")
     yield {
         "phase":        "recording_done",
         "side":         "triton",

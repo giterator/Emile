@@ -454,6 +454,10 @@ with tab_demo:
         "Baseline uses naive PyTorch · Optimized uses the Triton kernel below · "
         "Same prompt, same model weights, same A100."
     )
+    st.info(
+        "**Note:** Triton kernel optimizes **prefill attention**, speeding up TTFT especially for long prompts.",
+        icon="💡",
+    )
 
     # Determine which kernel to use: agent's best if available, else the debug kernel
     _demo_kernel_default = (
@@ -466,13 +470,104 @@ with tab_demo:
     with demo_col_left:
         prompt = st.text_area(
             "Prompt",
-            height=100,
+            height=380,
             value=(
-                "Explain in detail how the transformer attention mechanism works, "
-                "including the mathematical formulation of scaled dot-product attention, "
-                "why we scale by the square root of the head dimension, "
-                "and how multi-head attention differs from single-head attention. "
-                "Also discuss the computational complexity and memory requirements."
+                "I'm preparing for a FAANG coding interview and I want you to act "
+                "as my interviewer. Please walk me through the two LeetCode Hard "
+                "problems below with the same rigor an interviewer would expect: "
+                "clarify assumptions, propose multiple approaches from naive to "
+                "optimal, prove correctness informally, analyse time and space "
+                "complexity, identify tricky edge cases, and provide clean, "
+                "idiomatic Python code that would pass on LeetCode. After each "
+                "problem, briefly reflect on what the interviewer is really "
+                "testing and what a strong candidate should emphasise.\n\n"
+                "====================================================\n"
+                "Problem 1: Median of Two Sorted Arrays  (LeetCode 4, Hard)\n"
+                "====================================================\n\n"
+                "Given two sorted arrays `nums1` and `nums2` of size `m` and `n` "
+                "respectively, return the median of the two sorted arrays. The "
+                "overall run time complexity should be O(log (m + n)).\n\n"
+                "Example 1:\n"
+                "  Input:  nums1 = [1, 3], nums2 = [2]\n"
+                "  Output: 2.00000\n"
+                "  Explanation: merged array = [1, 2, 3] and median is 2.\n\n"
+                "Example 2:\n"
+                "  Input:  nums1 = [1, 2], nums2 = [3, 4]\n"
+                "  Output: 2.50000\n"
+                "  Explanation: merged array = [1, 2, 3, 4] and median is "
+                "(2 + 3) / 2 = 2.5.\n\n"
+                "Example 3:\n"
+                "  Input:  nums1 = [], nums2 = [1]\n"
+                "  Output: 1.00000\n\n"
+                "Example 4:\n"
+                "  Input:  nums1 = [0, 0], nums2 = [0, 0]\n"
+                "  Output: 0.00000\n\n"
+                "Constraints:\n"
+                "  - nums1.length == m\n"
+                "  - nums2.length == n\n"
+                "  - 0 <= m <= 1000\n"
+                "  - 0 <= n <= 1000\n"
+                "  - 1 <= m + n <= 2000\n"
+                "  - -10^6 <= nums1[i], nums2[i] <= 10^6\n"
+                "  - Both arrays are sorted in non-decreasing order.\n\n"
+                "Walk me through three approaches with increasing sophistication: "
+                "(1) the naive O((m+n) log(m+n)) concat-then-sort solution, "
+                "(2) the O(m+n) two-pointer merge that stops at the median index, "
+                "and (3) the optimal O(log(min(m, n))) binary-search-on-partitions "
+                "solution. For the optimal approach, explain the key insight about "
+                "partitioning both arrays so every element on the left side is "
+                "<= every element on the right side, the invariants that must hold "
+                "at each step, how to handle the empty-partition and boundary edge "
+                "cases using +/- infinity sentinels, and why binary searching only "
+                "the shorter array is both correct and gives the log(min(m, n)) "
+                "bound. Include clean Python code for all three approaches.\n\n"
+                "====================================================\n"
+                "Problem 2: Regular Expression Matching  (LeetCode 10, Hard)\n"
+                "====================================================\n\n"
+                "Given an input string `s` and a pattern `p`, implement regular "
+                "expression matching with support for '.' and '*' where:\n"
+                "  - '.'  matches any single character\n"
+                "  - '*'  matches zero or more of the PRECEDING element\n"
+                "The matching should cover the entire input string (not partial).\n\n"
+                "Example 1:\n"
+                "  Input:  s = \"aa\",   p = \"a\"\n"
+                "  Output: false\n"
+                "  Explanation: \"a\" does not match the entire string \"aa\".\n\n"
+                "Example 2:\n"
+                "  Input:  s = \"aa\",   p = \"a*\"\n"
+                "  Output: true\n"
+                "  Explanation: '*' means zero or more of the preceding element, "
+                "'a'. Therefore, by repeating 'a' once, it becomes \"aa\".\n\n"
+                "Example 3:\n"
+                "  Input:  s = \"ab\",   p = \".*\"\n"
+                "  Output: true\n"
+                "  Explanation: \".*\" means zero or more of any character.\n\n"
+                "Example 4:\n"
+                "  Input:  s = \"mississippi\", p = \"mis*is*p*.\"\n"
+                "  Output: false\n\n"
+                "Constraints:\n"
+                "  - 1 <= s.length <= 20\n"
+                "  - 1 <= p.length <= 20\n"
+                "  - `s` contains only lowercase English letters.\n"
+                "  - `p` contains only lowercase letters, '.', and '*'.\n"
+                "  - It is guaranteed for each appearance of '*', there will be "
+                "a previous valid character to match.\n\n"
+                "Walk me through: (1) the recursive brute-force solution and why "
+                "its worst-case complexity is exponential, (2) the top-down "
+                "memoised version with complexity O(m*n), and (3) the bottom-up "
+                "dynamic-programming formulation that fills a (m+1) x (n+1) table. "
+                "For the DP version, clearly define dp[i][j], state the recurrence "
+                "for the three cases ('*' matches zero copies, '*' matches one or "
+                "more copies, regular character or '.' match), and explain the "
+                "base cases -- especially why `dp[0][j]` for patterns like \"a*b*c*\" "
+                "needs careful handling. Discuss edge cases such as leading '*', "
+                "consecutive '*' (forbidden by constraints but worth noting), and "
+                "empty string / empty pattern. Provide clean Python code and "
+                "argue the O(m*n) time and space bound.\n\n"
+                "Finally, reflect on what makes these two problems classic Hard "
+                "interview questions: what invariant-reasoning, binary-search, and "
+                "DP skills they test, and what a strong candidate should emphasise "
+                "versus common pitfalls weaker candidates fall into."
             ),
         )
     with demo_col_right:
@@ -709,15 +804,35 @@ with tab_demo:
                     f"<div class='token-stream'>{t_text}</div>", unsafe_allow_html=True,
                 )
 
-                # Winner banner
+                # Result banner -- honest about wins vs regressions
                 sp_ttft = event.get("speedup_ttft")
                 sp_tps  = event.get("speedup_tps")
-                ttft_badge = f"<b>{sp_ttft:.2f}×</b> faster TTFT" if sp_ttft else ""
-                tps_badge  = f"<b>{sp_tps:.2f}×</b> higher throughput" if sp_tps else ""
+
+                def _fmt(sp, label):
+                    if not sp:
+                        return ""
+                    if sp >= 1.05:
+                        return f"<b>{sp:.2f}×</b> faster {label}"
+                    if sp <= 0.95:
+                        return f"<b>{1/sp:.2f}×</b> slower {label}"
+                    return f"<b>~1.0×</b> {label} (neutral)"
+
+                ttft_badge = _fmt(sp_ttft, "TTFT")
+                tps_badge  = _fmt(sp_tps,  "throughput")
                 sep = " &nbsp;·&nbsp; " if ttft_badge and tps_badge else ""
+
+                triton_wins = (sp_ttft or 0) >= 1.05 or (sp_tps or 0) >= 1.05
+                triton_loses = (sp_ttft or 1) <= 0.95 and (sp_tps or 1) <= 0.95
+                if triton_wins:
+                    header = "🏆 Triton wins:"
+                elif triton_loses:
+                    header = "⚠ Triton slower:"
+                else:
+                    header = "≈ Tie:"
+
                 status_ph.markdown(
                     f"<div class='metric-box' style='text-align:center'>"
-                    f"🏆 Triton wins: {ttft_badge}{sep}{tps_badge}</div>",
+                    f"{header} {ttft_badge}{sep}{tps_badge}</div>",
                     unsafe_allow_html=True,
                 )
 
