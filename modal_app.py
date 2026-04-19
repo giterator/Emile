@@ -619,7 +619,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
                                 or N < 64
                                 or N > 8192):
                             return _original_sdpa(query, key, value, attn_mask,
-                                                  dropout_p, is_causal, scale)
+                                                  dropout_p, is_causal, scale=scale)
                         # GQA expansion: repeat KV heads to match Q heads
                         if H_kv != H_q:
                             n_rep = H_q // H_kv
@@ -640,7 +640,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
                             print(f"[warn] Triton hook error — disabling for this run: {hook_err}")
                             _hook_failed[0] = True
                             return _original_sdpa(query, key, value, attn_mask,
-                                                  dropout_p, is_causal, scale)
+                                                  dropout_p, is_causal, scale=scale)
 
                     F.scaled_dot_product_attention = _sdpa_hook
                     patched = True

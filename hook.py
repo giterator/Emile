@@ -60,7 +60,7 @@ def _triton_sdpa(
     Falls back to the original SDPA for unsupported shapes.
     """
     if _optimized_kernel is None:
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
     B, H_q, N, D = query.shape
     H_kv = key.shape[1]
@@ -76,7 +76,7 @@ def _triton_sdpa(
         or N < 64
         or N > 8192
     ):
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
     # GQA → expand KV heads to match Q heads so the MHA kernel sees uniform shapes
     if H_kv != H_q:
@@ -88,7 +88,7 @@ def _triton_sdpa(
         return _optimized_kernel(query, key, value, is_causal=is_causal, scale=scale)
     except Exception:
         # Never crash the model — silently fall back
-        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)
+        return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale=scale)
 
 
 def patch_attention() -> None:
