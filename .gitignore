@@ -10,3 +10,6 @@ __pycache__/*
 *.pyzwzw
 *.pyzwzwz
 *.pyzwzwzw
+__pycache__/agent.cpython-313.pyc
+__pycache__/modal_app.cpython-313.pyc
+prompts/__pycache__/optimizer.cpython-313.pyc
