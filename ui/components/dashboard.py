@@ -584,8 +584,8 @@ def _panel_roofline(state: dict) -> str:
         f'stroke="{C_PARCHMENT_DIM}" stroke-width="1" stroke-dasharray="3 4" opacity="0.6"/>'
     )
     html_labels.append(
-        f'<div class="db-lbl font-sans parch-dim" style="left:{_pct(ridge_x+6, W)};'
-        f'top:{_pct(ridge_top+10, H)};transform:none;">ridge point (156 FLOP/byte)</div>'
+        f'<div class="db-lbl font-sans parch-dim" style="left:{_pct(ridge_x-4, W)};'
+        f'top:{_pct(ridge_top+10, H)};transform:translateX(-100%);">156</div>'
     )
     # Axis titles (absolute-positioned inside chart wrap)
     html_labels.append(
