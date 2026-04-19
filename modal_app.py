@@ -499,6 +499,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
 
     import torch
     import torch.nn.functional as F
+    import triton
     from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
     yield {"phase": "loading"}
@@ -523,73 +524,85 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
         yield {"phase": "error", "message": f"Model load failed: {e}"}
         return
 
-    # ── Phase 1: Direct kernel race ───────────────────────────────────────────
-    # Run both kernels on random tensors — same shape as profile_kernel uses.
-    # No hooks, no model internals, no JIT surprises during generation.
-    # Qwen3-4B config: 32 Q-heads, 128 head-dim, fp16.
-    B, H, N, D = 1, 32, context_tokens, 128
+    # ── Phase 1: Three-way kernel race ────────────────────────────────────────
+    # Identical methodology to `profile_kernel` (the one the agent loop uses):
+    #   - shape: B=2, H=32, N=context_tokens, D=128, fp16
+    #   - is_causal=False (matches profile_kernel's call signature)
+    #   - timer:  triton.testing.do_bench(warmup=20, rep=30) — CUDA-event based,
+    #             auto-tunes iteration count, far more accurate than wall-clock
+    # Three contenders share the exact same q/k/v tensors:
+    #   1. PyTorch reference  — unfused matmul + softmax + matmul (the "floor")
+    #   2. Agent's Triton kernel
+    #   3. PyTorch SDPA       — F.scaled_dot_product_attention, which on A100/fp16
+    #                            dispatches to cuDNN FlashAttention (the "ceiling")
+    # Showing all three makes it obvious what the agent beat (the unfused ref) and
+    # what it's still chasing (cuDNN's hand-tuned FlashAttention).
+    B, H, N, D = 2, 32, context_tokens, 128
     try:
         q = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
         k = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
         v = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
 
+        # 2 matmuls, each costing 2·B·H·N·N·D FLOPs
+        flops = 4 * B * H * N * N * D
+
+        def _bench(fn) -> float:
+            return triton.testing.do_bench(fn, warmup=20, rep=30)
+
+        # 1) PyTorch reference (unfused)
         ref_mod, ref_tmp = _write_and_import_kernel(_PYTORCH_REFERENCE_CODE)
         ref_attn = ref_mod.attention_kernel
-
-        WARMUP, ITERS = 5, 20
-        # Reference warmup + timed run
-        for _ in range(WARMUP):
-            ref_attn(q, k, v, is_causal=True)
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        for _ in range(ITERS):
-            ref_attn(q, k, v, is_causal=True)
-        torch.cuda.synchronize()
-        ref_ms = (time.perf_counter() - t0) * 1000 / ITERS
-
+        ref_ms     = _bench(lambda: ref_attn(q, k, v))
+        ref_tflops = flops / (ref_ms / 1000) / 1e12
         os.unlink(ref_tmp)
 
-        # TFLOPS formula: 2 matmuls each of cost 2*B*H*N*N*D
-        flops = 4 * B * H * N * N * D
-        ref_tflops = flops / (ref_ms / 1000) / 1e12
-
+        # 2) Agent's Triton kernel (optional — may be missing or broken)
         triton_ms     = None
         triton_tflops = 0.0
-        speedup       = 1.0
-
+        speedup_vs_ref = 1.0
         if kernel_code:
             try:
                 tri_mod, tri_tmp = _write_and_import_kernel(kernel_code)
                 tri_attn = getattr(tri_mod, "attention_kernel", None)
                 if tri_attn is not None:
-                    for _ in range(WARMUP):
-                        tri_attn(q, k, v, is_causal=True)
-                    torch.cuda.synchronize()
-                    t0 = time.perf_counter()
-                    for _ in range(ITERS):
-                        tri_attn(q, k, v, is_causal=True)
-                    torch.cuda.synchronize()
-                    triton_ms     = (time.perf_counter() - t0) * 1000 / ITERS
-                    triton_tflops = flops / (triton_ms / 1000) / 1e12
-                    speedup       = ref_ms / triton_ms
+                    triton_ms      = _bench(lambda: tri_attn(q, k, v))
+                    triton_tflops  = flops / (triton_ms / 1000) / 1e12
+                    speedup_vs_ref = ref_ms / triton_ms
                 os.unlink(tri_tmp)
             except Exception as ke:
                 print(f"[race] Triton kernel error: {ke}")
 
+        # 3) PyTorch SDPA (cuDNN FlashAttention on A100/fp16)
+        sdpa_ms     = _bench(lambda: F.scaled_dot_product_attention(q, k, v))
+        sdpa_tflops = flops / (sdpa_ms / 1000) / 1e12
+
+        triton_vs_sdpa = (sdpa_ms / triton_ms) if triton_ms else None
+
+        triton_log = (
+            f"triton={triton_ms:.2f}ms ({triton_tflops:.1f} TFLOPS) | "
+            f"triton_vs_ref={speedup_vs_ref:.2f}× | "
+            f"triton_vs_sdpa={triton_vs_sdpa:.2f}× | "
+            if triton_ms is not None else "triton=N/A | "
+        )
         print(
-            f"[race] ref={ref_ms:.2f}ms ({ref_tflops:.2f} TFLOPS) | "
-            f"triton={triton_ms:.2f}ms ({triton_tflops:.2f} TFLOPS) | "
-            f"speedup={speedup:.2f}×"
+            f"[race] ref={ref_ms:.2f}ms ({ref_tflops:.1f} TFLOPS) | "
+            f"{triton_log}"
+            f"sdpa={sdpa_ms:.2f}ms ({sdpa_tflops:.1f} TFLOPS)"
         )
 
         yield {
-            "phase":         "kernel_race_done",
-            "ref_ms":        round(ref_ms, 2),
-            "triton_ms":     round(triton_ms, 2) if triton_ms is not None else None,
-            "ref_tflops":    round(ref_tflops, 2),
-            "triton_tflops": round(triton_tflops, 2),
-            "speedup":       round(speedup, 2),
-            "n_tokens":      N,
+            "phase":          "kernel_race_done",
+            "ref_ms":         round(ref_ms, 3),
+            "ref_tflops":     round(ref_tflops, 1),
+            "triton_ms":      round(triton_ms, 3) if triton_ms is not None else None,
+            "triton_tflops":  round(triton_tflops, 1),
+            "sdpa_ms":        round(sdpa_ms, 3),
+            "sdpa_tflops":    round(sdpa_tflops, 1),
+            "speedup_vs_ref":  round(speedup_vs_ref, 2),
+            "triton_vs_sdpa": round(triton_vs_sdpa, 2) if triton_vs_sdpa else None,
+            "n_tokens":       N,
+            "batch":          B,
+            "n_heads":        H,
         }
     except Exception as e:
         yield {"phase": "error", "message": f"Kernel race failed: {e}"}
@@ -618,6 +631,10 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
 
     _original_sdpa = F.scaled_dot_product_attention
     patched = False
+    # Default counters in case the kernel is missing / hook never installs.
+    _hook_total    = [0]
+    _hook_triton   = [0]
+    _hook_fallback = [0]
 
     if kernel_code:
         try:
@@ -637,7 +654,6 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
                 print(f"[triton] Warmup OK (N=128 + N={inputs['input_ids'].shape[1]})")
 
                 _hook_failed = [False]
-                _hook_calls  = [0]
 
                 def _is_causal_mask(mask, q_len):
                     if mask is None or q_len < 2:
@@ -650,23 +666,26 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
                 def _sdpa_hook(query, key, value, attn_mask=None,
                                dropout_p=0.0, is_causal=False, scale=None):
                     _, _, N_q, D_q = query.shape
+                    _hook_total[0] += 1
                     if _is_causal_mask(attn_mask, N_q):
                         is_causal, attn_mask = True, None
                     if (_hook_failed[0] or query.dtype != torch.float16
                             or D_q not in (64, 128) or dropout_p > 0
                             or attn_mask is not None or N_q < 64):
+                        _hook_fallback[0] += 1
                         return _original_sdpa(query, key, value, attn_mask,
                                               dropout_p, is_causal, scale=scale)
                     try:
                         out = _triton_attn(query, key, value,
                                            is_causal=is_causal, scale=scale)
-                        if _hook_calls[0] == 0:
+                        if _hook_triton[0] == 0:
                             torch.cuda.synchronize()
-                        _hook_calls[0] += 1
+                        _hook_triton[0] += 1
                         return out
                     except Exception as he:
                         print(f"[warn] Triton hook error: {he}")
                         _hook_failed[0] = True
+                        _hook_fallback[0] += 1
                         return _original_sdpa(query, key, value, attn_mask,
                                               dropout_p, is_causal, scale=scale)
 
@@ -720,7 +739,11 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
     total_ms  = (time.perf_counter() - t0) * 1000
     final_tps = token_count / (total_ms / 1000) if total_ms > 0 else 0
 
-    print(f"[triton-gen] ttft={ttft_ms:.1f}ms total={total_ms:.1f}ms tps={final_tps:.1f}")
+    print(
+        f"[triton-gen] ttft={ttft_ms:.1f}ms total={total_ms:.1f}ms tps={final_tps:.1f} | "
+        f"hook calls: total={_hook_total[0]} triton={_hook_triton[0]} "
+        f"sdpa={_hook_fallback[0]}"
+    )
 
     yield {
         "phase":          "triton_done",
@@ -728,4 +751,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
         "time_ms":        round(total_ms, 1),
         "ttft_ms":        round(ttft_ms or 0, 1),
         "token_count":    token_count,
+        "hook_total":     _hook_total[0],
+        "hook_triton":    _hook_triton[0],
+        "hook_sdpa":      _hook_fallback[0],
     }
