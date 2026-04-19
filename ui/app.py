@@ -102,8 +102,11 @@ def _init_state():
         "baseline_metrics": None,
         "demo_running":   False,
         "triton_text":    "",
+        "baseline_text":  "",
         "triton_tps":     0.0,
-        "race_event":     None,
+        "race_replay":    None,
+        "baseline_rec":   None,
+        "triton_rec":     None,
         "demo_done":      False,
     }
     for k, v in defaults.items():
@@ -127,80 +130,19 @@ V1_KERNEL = _load_reference_kernel()
 # Render helpers for the demo tab race table and TTFT/hit-rate strip
 # ---------------------------------------------------------------------------
 
-def _render_race_table(event: dict) -> str:
-    """Three-way race card: PyTorch reference / Triton kernel / PyTorch SDPA."""
-    ref_ms      = event.get("ref_ms", 0.0)
-    ref_tf      = event.get("ref_tflops", 0.0)
-    triton_ms   = event.get("triton_ms")
-    triton_tf   = event.get("triton_tflops", 0.0)
-    sdpa_ms     = event.get("sdpa_ms", 0.0)
-    sdpa_tf     = event.get("sdpa_tflops", 0.0)
-    sp_vs_ref   = event.get("speedup_vs_ref", 1.0)
-    sp_vs_sdpa  = event.get("triton_vs_sdpa")
-    n           = event.get("n_tokens", 0)
-    b           = event.get("batch", 2)
-    h           = event.get("n_heads", 32)
-
-    triton_cell = (
-        f"<b>{triton_ms:.2f} ms</b><br>{triton_tf:.1f} TFLOPS"
-        if triton_ms is not None else "<i>not provided</i>"
-    )
-    vs_ref_badge  = f"<span class='speedup-badge'>{sp_vs_ref:.2f}× vs ref</span>"
-    vs_sdpa_label = (
-        f"<span style='color:#94e2d5'>{sp_vs_sdpa:.2f}× vs SDPA</span>"
-        if sp_vs_sdpa is not None else ""
-    )
-
-    return f"""
-    <div class='metric-box' style='text-align:center;padding:1em 0'>
-    <div style='font-size:0.85em;color:#6c7086;margin-bottom:0.6em'>
-    Direct kernel race &nbsp;·&nbsp; B={b} H={h} N={n} D=128 fp16 is_causal=False
-    &nbsp;·&nbsp; <code>triton.testing.do_bench</code> (warmup=20, rep=30)
-    </div>
-    <table style='width:100%;border-collapse:collapse;font-size:0.95em'>
-    <tr style='border-bottom:1px solid #313244'>
-      <th style='text-align:left;color:#f38ba8;padding:0.3em 0.6em;width:33%'>
-        PyTorch Reference<br>
-        <span style='font-size:0.75em;color:#6c7086;font-weight:normal'>(unfused matmul + softmax)</span>
-      </th>
-      <th style='text-align:left;color:#a6e3a1;padding:0.3em 0.6em;width:33%'>
-        Triton Kernel<br>
-        <span style='font-size:0.75em;color:#6c7086;font-weight:normal'>(agent's best)</span>
-      </th>
-      <th style='text-align:left;color:#89b4fa;padding:0.3em 0.6em;width:33%'>
-        PyTorch SDPA<br>
-        <span style='font-size:0.75em;color:#6c7086;font-weight:normal'>(cuDNN FlashAttention)</span>
-      </th>
-    </tr>
-    <tr>
-      <td style='padding:0.5em 0.6em'><b>{ref_ms:.2f} ms</b><br>{ref_tf:.1f} TFLOPS</td>
-      <td style='padding:0.5em 0.6em'>{triton_cell}</td>
-      <td style='padding:0.5em 0.6em'><b>{sdpa_ms:.2f} ms</b><br>{sdpa_tf:.1f} TFLOPS</td>
-    </tr>
-    </table>
-    <div style='margin-top:0.7em;font-size:0.95em'>
-    {vs_ref_badge} &nbsp;&nbsp; {vs_sdpa_label}
-    </div>
-    </div>
-    """
-
-
-def _render_ttft_and_hitrate(event: dict) -> str:
-    """TTFT line + Triton-vs-SDPA hit-rate breakdown for the model run."""
-    ttft   = event.get("ttft_ms", 0.0)
-    total  = event.get("hook_total", 0)
-    tri    = event.get("hook_triton", 0)
-    sdpa   = event.get("hook_sdpa", 0)
-    pct    = (tri / total * 100) if total else 0.0
-    hit    = (
-        f" &nbsp;·&nbsp; <span style='color:#cdd6f4'>"
-        f"attention calls: <b>{tri}</b> Triton / <b>{sdpa}</b> SDPA "
-        f"(<b>{pct:.0f}%</b> Triton)</span>"
-        if total else ""
-    )
+def _render_metrics(rec: dict, color: str) -> str:
+    """Metrics strip: throughput, TTFT, total execution time, total tokens generated."""
+    tps      = rec.get("tps", 0.0)
+    ttft     = rec.get("ttft_ms", 0.0)
+    total_ms = rec.get("total_ms", 0.0)
+    count    = rec.get("count", 0)
     return (
-        f"<div style='color:#a6e3a1;font-size:0.85em;margin-top:-0.3em'>"
-        f"TTFT: <b>{ttft:.0f} ms</b>{hit}</div>"
+        f"<div style='color:{color};font-size:0.85em;margin-top:-0.3em;line-height:1.6em'>"
+        f"throughput: <b>{tps:.1f} tok/s</b> &nbsp;·&nbsp; "
+        f"TTFT: <b>{ttft:.0f} ms</b> &nbsp;·&nbsp; "
+        f"total time: <b>{total_ms:.0f} ms</b> &nbsp;·&nbsp; "
+        f"tokens generated: <b>{count}</b>"
+        f"</div>"
     )
 
 
@@ -509,7 +451,7 @@ with tab_agent:
 with tab_demo:
     st.markdown("#### Side-by-side Qwen3-4B Inference")
     st.caption(
-        "Baseline uses PyTorch SDPA · Optimized uses the Triton kernel below · "
+        "Baseline uses naive PyTorch · Optimized uses the Triton kernel below · "
         "Same prompt, same model weights, same A100."
     )
 
@@ -570,93 +512,219 @@ with tab_demo:
 
     st.divider()
 
-    # ── Layout: kernel race banner + model output ──────────────────────
-    race_ph   = st.empty()   # kernel benchmark result card
-    st.markdown(
-        "### Triton Model Output  <span style='color:#a6e3a1;font-size:0.7em'>⚡</span>",
-        unsafe_allow_html=True,
-    )
-    triton_speed_ph  = st.empty()
-    triton_ttft_ph   = st.empty()
-    triton_output_ph = st.empty()
+    # ── Layout: status + side-by-side model output ──────────────────────────
+    status_ph = st.empty()   # "Recording baseline / triton / replaying..." status
+
+    col_base, col_sep, col_triton = st.columns([10, 0.4, 10])
+    with col_base:
+        st.markdown(
+            "### Naive PyTorch  <span style='color:#f38ba8;font-size:0.7em'>(baseline)</span>",
+            unsafe_allow_html=True,
+        )
+        base_speed_ph  = st.empty()
+        base_ttft_ph   = st.empty()
+        base_output_ph = st.empty()
+    with col_sep:
+        st.markdown(
+            "<div style='border-left:2px solid #313244;height:400px;margin-top:2em'></div>",
+            unsafe_allow_html=True,
+        )
+    with col_triton:
+        st.markdown(
+            "### Triton Kernel Integration  <span style='color:#a6e3a1;font-size:0.7em'>⚡ optimized</span>",
+            unsafe_allow_html=True,
+        )
+        triton_speed_ph  = st.empty()
+        triton_ttft_ph   = st.empty()
+        triton_output_ph = st.empty()
 
     summary_row = st.empty()
 
     # ── Run the demo ──────────────────────────────────────────────────
-
     if demo_btn:
-        st.session_state.demo_running   = True
-        st.session_state.triton_text    = ""
-        st.session_state.demo_done      = False
-        st.session_state.race_event     = None
-
+        import time
         import modal
+
+        st.session_state.demo_running    = True
+        st.session_state.demo_done       = False
+        st.session_state.baseline_text   = ""
+        st.session_state.triton_text     = ""
+        st.session_state.baseline_rec    = None
+        st.session_state.triton_rec      = None
 
         inference_fn = modal.Function.from_name(
             "qwen3-kernel-optimizer", "run_inference_comparison"
         )
 
-        race_ph.markdown(
-            "<div class='metric-box' style='text-align:center'>🔄 Running kernel race...</div>",
+        status_ph.markdown(
+            "<div class='metric-box' style='text-align:center'>🔄 Loading Qwen3-4B...</div>",
+            unsafe_allow_html=True,
+        )
+        base_speed_ph.markdown(
+            "<span class='speed-counter baseline-speed'>⏳ waiting...</span>",
             unsafe_allow_html=True,
         )
         triton_speed_ph.markdown(
-            "<span class='speed-counter triton-speed'>⏳ waiting for kernel race...</span>",
+            "<span class='speed-counter triton-speed'>⏳ waiting...</span>",
             unsafe_allow_html=True,
         )
-
-        triton_tps_final = 0.0
-        triton_ttft_final = 0.0
 
         for event in inference_fn.remote_gen(prompt, demo_kernel_code, max_tokens, context_tokens):
             phase = event.get("phase")
 
             if phase == "loading":
-                race_ph.markdown(
-                    "<div class='metric-box' style='text-align:center'>🔄 Loading model...</div>",
+                status_ph.markdown(
+                    "<div class='metric-box' style='text-align:center'>🔄 Loading Qwen3-4B...</div>",
                     unsafe_allow_html=True,
                 )
 
-            elif phase == "kernel_race_done":
-                st.session_state.race_event = event
-                race_ph.markdown(_render_race_table(event), unsafe_allow_html=True)
+            elif phase == "recording_start":
+                side = event.get("side", "?")
+                if side == "baseline":
+                    status_ph.markdown(
+                        "<div class='metric-box' style='text-align:center;color:#f38ba8'>"
+                        "🔴 Recording baseline (naive PyTorch) generation...</div>",
+                        unsafe_allow_html=True,
+                    )
+                    base_speed_ph.markdown(
+                        "<span class='speed-counter baseline-speed'>🔴 recording...</span>",
+                        unsafe_allow_html=True,
+                    )
+                elif side == "triton":
+                    status_ph.markdown(
+                        "<div class='metric-box' style='text-align:center;color:#a6e3a1'>"
+                        "🔴 Recording Triton generation...</div>",
+                        unsafe_allow_html=True,
+                    )
+                    triton_speed_ph.markdown(
+                        "<span class='speed-counter triton-speed'>🔴 recording...</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            elif phase == "recording_done":
+                side = event.get("side", "?")
+                if side == "baseline":
+                    st.session_state.baseline_rec = event
+                    base_speed_ph.markdown(
+                        "<span class='speed-counter baseline-speed'>✓ recorded</span>",
+                        unsafe_allow_html=True,
+                    )
+                elif side == "triton":
+                    st.session_state.triton_rec = event
+                    triton_speed_ph.markdown(
+                        "<span class='speed-counter triton-speed'>✓ recorded</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            elif phase == "race_replay":
+                # ── Animate both recordings simultaneously using the recorded timestamps ──
+                baseline = event["baseline"]
+                triton   = event["triton"]
+                b_tokens = baseline.get("tokens", [])
+                t_tokens = triton.get("tokens", [])
+
+                # Small speedup so the demo doesn't take the full wall-clock duration.
+                # Using 1.0 = real time; set to e.g. 2.0 to replay at 2x speed. Keep 1.0 for honesty.
+                REPLAY_SPEED = 1.0
+
+                status_ph.markdown(
+                    "<div class='metric-box' style='text-align:center;color:#cba6f7'>"
+                    "🏁 Replaying both generations at recorded speeds (watch the race)...</div>",
+                    unsafe_allow_html=True,
+                )
+
+                b_idx = t_idx = 0
+                b_text = t_text = ""
+                b_finished = t_finished = False
+                start_wall = time.perf_counter()
+                max_elapsed = max(
+                    b_tokens[-1]["elapsed_ms"] if b_tokens else 0,
+                    t_tokens[-1]["elapsed_ms"] if t_tokens else 0,
+                )
+
+                while b_idx < len(b_tokens) or t_idx < len(t_tokens):
+                    elapsed_real_ms = (time.perf_counter() - start_wall) * 1000 * REPLAY_SPEED
+                    updated = False
+
+                    while b_idx < len(b_tokens) and b_tokens[b_idx]["elapsed_ms"] <= elapsed_real_ms:
+                        b_text += b_tokens[b_idx]["text"]
+                        b_idx += 1
+                        updated = True
+                    while t_idx < len(t_tokens) and t_tokens[t_idx]["elapsed_ms"] <= elapsed_real_ms:
+                        t_text += t_tokens[t_idx]["text"]
+                        t_idx += 1
+                        updated = True
+
+                    if updated:
+                        b_tps = (b_idx / (elapsed_real_ms / 1000)) if elapsed_real_ms > 0 else 0
+                        t_tps = (t_idx / (elapsed_real_ms / 1000)) if elapsed_real_ms > 0 else 0
+                        b_cursor = "▌" if b_idx < len(b_tokens) else ""
+                        t_cursor = "▌" if t_idx < len(t_tokens) else ""
+                        base_speed_ph.markdown(
+                            f"<span class='speed-counter baseline-speed'>{b_tps:.1f} tok/s {b_cursor}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        triton_speed_ph.markdown(
+                            f"<span class='speed-counter triton-speed'>{t_tps:.1f} tok/s {t_cursor}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        base_output_ph.markdown(
+                            f"<div class='token-stream'>{b_text}{b_cursor}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        triton_output_ph.markdown(
+                            f"<div class='token-stream'>{t_text}{t_cursor}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Flag finish events as they cross the line (first time we reach their end)
+                    if not b_finished and b_idx >= len(b_tokens):
+                        b_finished = True
+                    if not t_finished and t_idx >= len(t_tokens):
+                        t_finished = True
+
+                    time.sleep(0.02)
+
+                # Final render with full text and measured stats
+                base_speed_ph.markdown(
+                    f"<span class='speed-counter baseline-speed'>{baseline['tps']:.1f} tok/s</span>",
+                    unsafe_allow_html=True,
+                )
                 triton_speed_ph.markdown(
-                    "<span class='speed-counter triton-speed'>🔄 generating...</span>",
+                    f"<span class='speed-counter triton-speed'>{triton['tps']:.1f} tok/s</span>",
                     unsafe_allow_html=True,
                 )
-
-            elif phase == "triton_token":
-                st.session_state.triton_text += event["token"]
-                tps = event["tokens_per_sec"]
-                triton_speed_ph.markdown(
-                    f"<span class='speed-counter triton-speed'>{tps:.1f} tok/s ▌</span>",
-                    unsafe_allow_html=True,
-                )
-                triton_output_ph.markdown(
-                    f"<div class='token-stream'>{st.session_state.triton_text}▌</div>",
-                    unsafe_allow_html=True,
-                )
-
-            elif phase == "triton_done":
-                triton_tps_final  = event["tokens_per_sec"]
-                triton_ttft_final = event.get("ttft_ms", 0.0)
-                st.session_state.triton_tps   = triton_tps_final
-                st.session_state.triton_ttft  = triton_ttft_final
-                st.session_state.triton_done_event = event
-
-                triton_speed_ph.markdown(
-                    f"<span class='speed-counter triton-speed'>{triton_tps_final:.1f} tok/s</span>",
+                base_ttft_ph.markdown(
+                    _render_metrics(baseline, "#f38ba8"),
                     unsafe_allow_html=True,
                 )
                 triton_ttft_ph.markdown(
-                    _render_ttft_and_hitrate(event),
+                    _render_metrics(triton, "#a6e3a1"),
                     unsafe_allow_html=True,
+                )
+                base_output_ph.markdown(
+                    f"<div class='token-stream'>{b_text}</div>", unsafe_allow_html=True,
                 )
                 triton_output_ph.markdown(
-                    f"<div class='token-stream'>{st.session_state.triton_text}</div>",
+                    f"<div class='token-stream'>{t_text}</div>", unsafe_allow_html=True,
+                )
+
+                # Winner banner
+                sp_ttft = event.get("speedup_ttft")
+                sp_tps  = event.get("speedup_tps")
+                ttft_badge = f"<b>{sp_ttft:.2f}×</b> faster TTFT" if sp_ttft else ""
+                tps_badge  = f"<b>{sp_tps:.2f}×</b> higher throughput" if sp_tps else ""
+                sep = " &nbsp;·&nbsp; " if ttft_badge and tps_badge else ""
+                status_ph.markdown(
+                    f"<div class='metric-box' style='text-align:center'>"
+                    f"🏆 Triton wins: {ttft_badge}{sep}{tps_badge}</div>",
                     unsafe_allow_html=True,
                 )
-                st.session_state.demo_done = True
+
+                st.session_state.baseline_text = b_text
+                st.session_state.triton_text   = t_text
+                st.session_state.race_replay   = event
+                st.session_state.demo_done     = True
 
             elif phase == "error":
                 st.error(f"Demo error: {event['message']}")
@@ -666,23 +734,32 @@ with tab_demo:
 
     # Restore completed state on re-render
     elif st.session_state.demo_done:
-        _race = st.session_state.get("race_event")
-        if _race:
-            race_ph.markdown(_render_race_table(_race), unsafe_allow_html=True)
-
-        _t_tps   = st.session_state.triton_tps
-        _t_event = st.session_state.get("triton_done_event") or {
-            "ttft_ms": st.session_state.get("triton_ttft", 0.0)
-        }
-        triton_speed_ph.markdown(
-            f"<span class='speed-counter triton-speed'>{_t_tps:.1f} tok/s</span>",
-            unsafe_allow_html=True,
-        )
-        triton_ttft_ph.markdown(
-            _render_ttft_and_hitrate(_t_event),
-            unsafe_allow_html=True,
-        )
-        triton_output_ph.markdown(
-            f"<div class='token-stream'>{st.session_state.triton_text}</div>",
-            unsafe_allow_html=True,
-        )
+        _replay = st.session_state.get("race_replay") or {}
+        baseline = _replay.get("baseline", {})
+        triton   = _replay.get("triton", {})
+        if baseline:
+            base_speed_ph.markdown(
+                f"<span class='speed-counter baseline-speed'>{baseline.get('tps', 0):.1f} tok/s</span>",
+                unsafe_allow_html=True,
+            )
+            base_ttft_ph.markdown(
+                _render_metrics(baseline, "#f38ba8"),
+                unsafe_allow_html=True,
+            )
+            base_output_ph.markdown(
+                f"<div class='token-stream'>{st.session_state.get('baseline_text', '')}</div>",
+                unsafe_allow_html=True,
+            )
+        if triton:
+            triton_speed_ph.markdown(
+                f"<span class='speed-counter triton-speed'>{triton.get('tps', 0):.1f} tok/s</span>",
+                unsafe_allow_html=True,
+            )
+            triton_ttft_ph.markdown(
+                _render_metrics(triton, "#a6e3a1"),
+                unsafe_allow_html=True,
+            )
+            triton_output_ph.markdown(
+                f"<div class='token-stream'>{st.session_state.get('triton_text', '')}</div>",
+                unsafe_allow_html=True,
+            )
