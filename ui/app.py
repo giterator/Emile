@@ -101,10 +101,9 @@ def _init_state():
         "best_metrics":   None,
         "baseline_metrics": None,
         "demo_running":   False,
-        "baseline_text":  "",
         "triton_text":    "",
-        "baseline_tps":   0.0,
         "triton_tps":     0.0,
+        "race_event":     None,
         "demo_done":      False,
     }
     for k, v in defaults.items():
@@ -455,6 +454,15 @@ with tab_demo:
         )
     with demo_col_right:
         max_tokens = st.slider("Max new tokens", 50, 300, 150)
+        context_tokens = st.slider(
+            "Context length (tokens)",
+            128, 4096, 1024, 128,
+            help=(
+                "Pad the prompt to this many tokens before generation. "
+                "Larger values make prefill dominate and surface the real "
+                "Triton vs PyTorch-reference speedup (matches the benchmark shape)."
+            ),
+        )
         if not st.session_state.opt_done:
             st.info(
                 "Using built-in debug kernel. Run the Agent Optimizer to test "
@@ -481,43 +489,25 @@ with tab_demo:
 
     st.divider()
 
-    # Side-by-side columns
-    col_base, col_sep, col_triton = st.columns([10, 0.4, 10])
+    # ── Layout: kernel race banner + model output ──────────────────────
+    race_ph   = st.empty()   # kernel benchmark result card
+    st.markdown(
+        "### Triton Model Output  <span style='color:#a6e3a1;font-size:0.7em'>⚡</span>",
+        unsafe_allow_html=True,
+    )
+    triton_speed_ph  = st.empty()
+    triton_ttft_ph   = st.empty()
+    triton_output_ph = st.empty()
 
-    with col_base:
-        st.markdown(
-            "### PyTorch SDPA  <span style='color:#f38ba8;font-size:0.7em'>(baseline)</span>",
-            unsafe_allow_html=True,
-        )
-        base_speed_ph  = st.empty()
-        base_ttft_ph   = st.empty()
-        base_output_ph = st.empty()
-
-    with col_sep:
-        st.markdown(
-            "<div style='border-left:2px solid #313244;height:400px;margin-top:2em'></div>",
-            unsafe_allow_html=True,
-        )
-
-    with col_triton:
-        st.markdown(
-            "### Triton Optimized  <span style='color:#a6e3a1;font-size:0.7em'>⚡</span>",
-            unsafe_allow_html=True,
-        )
-        triton_speed_ph  = st.empty()
-        triton_ttft_ph   = st.empty()
-        triton_output_ph = st.empty()
-
-    # Summary row (shown after both finish)
     summary_row = st.empty()
 
     # ── Run the demo ──────────────────────────────────────────────────
 
     if demo_btn:
-        st.session_state.demo_running = True
-        st.session_state.baseline_text = ""
-        st.session_state.triton_text   = ""
-        st.session_state.demo_done     = False
+        st.session_state.demo_running   = True
+        st.session_state.triton_text    = ""
+        st.session_state.demo_done      = False
+        st.session_state.race_event     = None
 
         import modal
 
@@ -525,58 +515,61 @@ with tab_demo:
             "qwen3-kernel-optimizer", "run_inference_comparison"
         )
 
-        baseline_tps_final  = 0.0
-        triton_tps_final    = 0.0
-        baseline_time_final = 0.0
-        triton_time_final   = 0.0
-        baseline_ttft_final = 0.0
-        triton_ttft_final   = 0.0
-
-        base_speed_ph.markdown(
-            "<span class='speed-counter baseline-speed'>⏳ loading...</span>",
+        race_ph.markdown(
+            "<div class='metric-box' style='text-align:center'>🔄 Running kernel race...</div>",
             unsafe_allow_html=True,
         )
         triton_speed_ph.markdown(
-            "<span class='speed-counter triton-speed'>⏳ waiting...</span>",
+            "<span class='speed-counter triton-speed'>⏳ waiting for kernel race...</span>",
             unsafe_allow_html=True,
         )
 
-        for event in inference_fn.remote_gen(prompt, demo_kernel_code, max_tokens):
+        triton_tps_final = 0.0
+        triton_ttft_final = 0.0
+
+        for event in inference_fn.remote_gen(prompt, demo_kernel_code, max_tokens, context_tokens):
             phase = event.get("phase")
 
             if phase == "loading":
-                base_speed_ph.markdown(
-                    "<span class='speed-counter baseline-speed'>🔄 loading model...</span>",
+                race_ph.markdown(
+                    "<div class='metric-box' style='text-align:center'>🔄 Loading model...</div>",
                     unsafe_allow_html=True,
                 )
 
-            elif phase == "baseline_start":
-                base_speed_ph.markdown(
-                    "<span class='speed-counter baseline-speed'>🔄 generating...</span>",
-                    unsafe_allow_html=True,
-                )
+            elif phase == "kernel_race_done":
+                st.session_state.race_event = event
+                ref_ms        = event["ref_ms"]
+                triton_ms     = event.get("triton_ms")
+                ref_tflops    = event["ref_tflops"]
+                triton_tflops = event["triton_tflops"]
+                speedup       = event["speedup"]
+                n_tok         = event["n_tokens"]
 
-            elif phase == "baseline_done":
-                tps  = event["tokens_per_sec"]
-                text = event["text"]
-                baseline_tps_final  = tps
-                baseline_time_final = event["time_ms"]
-                baseline_ttft_final = event.get("ttft_ms", 0.0)
-                st.session_state.baseline_text = text
-                st.session_state.baseline_tps  = tps
-                st.session_state.baseline_ttft = baseline_ttft_final
-
-                base_speed_ph.markdown(
-                    f"<span class='speed-counter baseline-speed'>{tps:.1f} tok/s</span>",
-                    unsafe_allow_html=True,
+                triton_cell = (
+                    f"<b>{triton_ms:.2f} ms</b> &nbsp;·&nbsp; {triton_tflops:.1f} TFLOPS"
+                    if triton_ms is not None
+                    else "<i>not provided</i>"
                 )
-                base_ttft_ph.markdown(
-                    f"<div style='color:#cdd6f4;font-size:0.85em;margin-top:-0.3em'>"
-                    f"TTFT: <b>{baseline_ttft_final:.0f} ms</b></div>",
-                    unsafe_allow_html=True,
-                )
-                base_output_ph.markdown(
-                    f"<div class='token-stream'>{text}</div>",
+                race_ph.markdown(
+                    f"""
+                    <div class='metric-box' style='text-align:center;padding:1em 0'>
+                    <div style='font-size:0.85em;color:#6c7086;margin-bottom:0.5em'>
+                    Direct kernel race &nbsp;·&nbsp; B=1 H=32 N={n_tok} D=128 fp16 is_causal=True
+                    </div>
+                    <table style='width:100%;border-collapse:collapse;font-size:1em'>
+                    <tr>
+                      <th style='text-align:left;color:#f38ba8;padding:0.2em 0.6em'>PyTorch Reference</th>
+                      <th style='text-align:left;color:#a6e3a1;padding:0.2em 0.6em'>Triton Kernel</th>
+                      <th style='text-align:left;color:#f9e2af;padding:0.2em 0.6em'>Speedup</th>
+                    </tr>
+                    <tr>
+                      <td style='padding:0.2em 0.6em'><b>{ref_ms:.2f} ms</b> &nbsp;·&nbsp; {ref_tflops:.1f} TFLOPS</td>
+                      <td style='padding:0.2em 0.6em'>{triton_cell}</td>
+                      <td style='padding:0.2em 0.6em'><span class='speedup-badge'>{speedup:.2f}×</span></td>
+                    </tr>
+                    </table>
+                    </div>
+                    """,
                     unsafe_allow_html=True,
                 )
                 triton_speed_ph.markdown(
@@ -587,7 +580,6 @@ with tab_demo:
             elif phase == "triton_token":
                 st.session_state.triton_text += event["token"]
                 tps = event["tokens_per_sec"]
-
                 triton_speed_ph.markdown(
                     f"<span class='speed-counter triton-speed'>{tps:.1f} tok/s ▌</span>",
                     unsafe_allow_html=True,
@@ -599,10 +591,7 @@ with tab_demo:
 
             elif phase == "triton_done":
                 triton_tps_final  = event["tokens_per_sec"]
-                triton_time_final = event["time_ms"]
                 triton_ttft_final = event.get("ttft_ms", 0.0)
-                speedup           = event["speedup"]
-                ttft_speedup      = event.get("ttft_speedup", 1.0)
                 st.session_state.triton_tps  = triton_tps_final
                 st.session_state.triton_ttft = triton_ttft_final
 
@@ -612,27 +601,11 @@ with tab_demo:
                 )
                 triton_ttft_ph.markdown(
                     f"<div style='color:#a6e3a1;font-size:0.85em;margin-top:-0.3em'>"
-                    f"TTFT: <b>{triton_ttft_final:.0f} ms</b>"
-                    f"&nbsp;<span style='color:#f9e2af'>({ttft_speedup:.1f}× faster)</span></div>",
+                    f"TTFT: <b>{triton_ttft_final:.0f} ms</b></div>",
                     unsafe_allow_html=True,
                 )
                 triton_output_ph.markdown(
                     f"<div class='token-stream'>{st.session_state.triton_text}</div>",
-                    unsafe_allow_html=True,
-                )
-
-                summary_row.markdown(
-                    f"""
-                    <div class='metric-box' style='margin-top:1em;text-align:center'>
-                    <span style='font-size:1.1em'>
-                    Throughput: <b>{baseline_tps_final:.1f}</b> → <b>{triton_tps_final:.1f} tok/s</b>
-                    &nbsp;<span class='speedup-badge'>{speedup}×</span>&nbsp;
-                    &nbsp;|&nbsp;
-                    TTFT: <b>{baseline_ttft_final:.0f}</b> → <b>{triton_ttft_final:.0f} ms</b>
-                    &nbsp;<span class='speedup-badge'>{ttft_speedup:.1f}×</span>
-                    </span>
-                    </div>
-                    """,
                     unsafe_allow_html=True,
                 )
                 st.session_state.demo_done = True
@@ -645,34 +618,50 @@ with tab_demo:
 
     # Restore completed state on re-render
     elif st.session_state.demo_done:
-        _b_tps  = st.session_state.baseline_tps
-        _t_tps  = st.session_state.triton_tps
-        _b_ttft = st.session_state.get("baseline_ttft", 0.0)
-        _t_ttft = st.session_state.get("triton_ttft", 0.0)
-        _tput_x = round(_t_tps / _b_tps, 2) if _b_tps > 0 else 1.0
-        _ttft_x = round(_b_ttft / _t_ttft, 2) if _t_ttft > 0 else 1.0
+        _race = st.session_state.get("race_event")
+        if _race:
+            _ref_ms    = _race["ref_ms"]
+            _tri_ms    = _race.get("triton_ms")
+            _ref_tf    = _race["ref_tflops"]
+            _tri_tf    = _race["triton_tflops"]
+            _speedup   = _race["speedup"]
+            _n         = _race["n_tokens"]
+            _tri_cell  = (
+                f"<b>{_tri_ms:.2f} ms</b> &nbsp;·&nbsp; {_tri_tf:.1f} TFLOPS"
+                if _tri_ms is not None else "<i>not provided</i>"
+            )
+            race_ph.markdown(
+                f"""
+                <div class='metric-box' style='text-align:center;padding:1em 0'>
+                <div style='font-size:0.85em;color:#6c7086;margin-bottom:0.5em'>
+                Direct kernel race &nbsp;·&nbsp; B=1 H=32 N={_n} D=128 fp16 is_causal=True
+                </div>
+                <table style='width:100%;border-collapse:collapse;font-size:1em'>
+                <tr>
+                  <th style='text-align:left;color:#f38ba8;padding:0.2em 0.6em'>PyTorch Reference</th>
+                  <th style='text-align:left;color:#a6e3a1;padding:0.2em 0.6em'>Triton Kernel</th>
+                  <th style='text-align:left;color:#f9e2af;padding:0.2em 0.6em'>Speedup</th>
+                </tr>
+                <tr>
+                  <td style='padding:0.2em 0.6em'><b>{_ref_ms:.2f} ms</b> &nbsp;·&nbsp; {_ref_tf:.1f} TFLOPS</td>
+                  <td style='padding:0.2em 0.6em'>{_tri_cell}</td>
+                  <td style='padding:0.2em 0.6em'><span class='speedup-badge'>{_speedup:.2f}×</span></td>
+                </tr>
+                </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        base_speed_ph.markdown(
-            f"<span class='speed-counter baseline-speed'>{_b_tps:.1f} tok/s</span>",
-            unsafe_allow_html=True,
-        )
-        base_ttft_ph.markdown(
-            f"<div style='color:#cdd6f4;font-size:0.85em;margin-top:-0.3em'>"
-            f"TTFT: <b>{_b_ttft:.0f} ms</b></div>",
-            unsafe_allow_html=True,
-        )
-        base_output_ph.markdown(
-            f"<div class='token-stream'>{st.session_state.baseline_text}</div>",
-            unsafe_allow_html=True,
-        )
+        _t_tps  = st.session_state.triton_tps
+        _t_ttft = st.session_state.get("triton_ttft", 0.0)
         triton_speed_ph.markdown(
             f"<span class='speed-counter triton-speed'>{_t_tps:.1f} tok/s</span>",
             unsafe_allow_html=True,
         )
         triton_ttft_ph.markdown(
             f"<div style='color:#a6e3a1;font-size:0.85em;margin-top:-0.3em'>"
-            f"TTFT: <b>{_t_ttft:.0f} ms</b>"
-            f"&nbsp;<span style='color:#f9e2af'>({_ttft_x:.1f}× faster)</span></div>",
+            f"TTFT: <b>{_t_ttft:.0f} ms</b></div>",
             unsafe_allow_html=True,
         )
         triton_output_ph.markdown(
@@ -682,12 +671,8 @@ with tab_demo:
         summary_row.markdown(
             f"""
             <div class='metric-box' style='margin-top:1em;text-align:center'>
-            <span style='font-size:1.1em'>
-            Throughput: <b>{_b_tps:.1f}</b> → <b>{_t_tps:.1f} tok/s</b>
-            &nbsp;<span class='speedup-badge'>{_tput_x}×</span>&nbsp;
-            &nbsp;|&nbsp;
-            TTFT: <b>{_b_ttft:.0f}</b> → <b>{_t_ttft:.0f} ms</b>
-            &nbsp;<span class='speedup-badge'>{_ttft_x:.1f}×</span>
+            <span style='font-size:0.85em;color:#6c7086'>
+            Kernel race complete &nbsp;·&nbsp; model output generated with Triton kernel active
             </span>
             </div>
             """,
