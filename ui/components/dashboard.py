@@ -197,10 +197,33 @@ _CSS = """
   color: var(--parchment-dim, #C9BFA8); font-family: Inter, sans-serif;
   font-size: 12px; letter-spacing:.06em; text-transform: uppercase;
 }
-.db-svg { width:100%; display:block; }
-.db-tflops-svg   { height: 240px; }
-.db-roofline-svg { height: 300px; }
-.db-spark-svg    { height: 120px; }
+.db-chart { position: relative; width: 100%; }
+.db-chart.tflops   { height: 320px; }
+.db-chart.roofline { height: 360px; }
+.db-chart.spark    { height: 160px; }
+.db-svg { width:100%; height:100%; display:block; }
+
+/* HTML labels overlayed on the stretched SVG so text never distorts. */
+.db-lbl {
+  position: absolute;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--parchment-dim, #C9BFA8);
+  line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.db-lbl.axis-y { text-align: right; transform: translate(-100%, -50%); padding-right: 6px; }
+.db-lbl.axis-x { transform: translate(-50%, 0); padding-top: 4px; }
+.db-lbl.axis-y2 { text-align: left; transform: translate(0, -50%); padding-left: 6px; }
+.db-lbl.inline-r { text-align: right; transform: translate(-100%, -120%); padding-right: 6px; }
+.db-lbl.inline-l { text-align: left;  transform: translate(0, -120%); padding-left: 6px; }
+.db-lbl.font-sans { font-family: Inter, sans-serif; }
+.db-lbl.saffron { color: var(--saffron, #E8B14A); }
+.db-lbl.copper  { color: var(--copper,  #C97B4A); }
+.db-lbl.basil   { color: var(--basil,   #5E8A5A); }
+.db-lbl.bordeaux{ color: var(--bordeaux,#7A1F2B); }
+.db-lbl.parch-dim { color: var(--parchment-dim,#C9BFA8); opacity: 0.85; }
 .db-occ-wrap {
   display:flex; align-items:center; gap:14px;
 }
@@ -317,7 +340,7 @@ def _panel_tflops(state: dict) -> str:
         """
 
     # Canvas
-    W, H = 640, 240
+    W, H = 640, 300
     MX_L, MX_R, MY_T, MY_B = 44, 12, 14, 28
     x0, x1 = MX_L, W - MX_R
     y0, y1 = MY_T, H - MY_B
@@ -353,23 +376,24 @@ def _panel_tflops(state: dict) -> str:
                 f'height="{y1-by:.2f}" fill="{C_BORDEAUX}" opacity="0.20" />'
             )
 
-    # Axes / grid
+    # Axes / grid (lines only — labels become HTML overlays)
     grid = []
-    tick_labels = []
+    html_labels: List[str] = []
+    def _pct(coord: float, dim: float) -> str:
+        return f"{coord / dim * 100:.3f}%"
+
     for yt in yticks:
         gy = sy(yt)
         grid.append(f'<line x1="{x0}" y1="{gy:.2f}" x2="{x1}" y2="{gy:.2f}" '
                     f'stroke="{C_STEEL_2}" stroke-width="1" />')
-        tick_labels.append(
-            f'<text x="{x0-6:.1f}" y="{gy+3.5:.2f}" text-anchor="end" '
-            f'fill="{C_PARCHMENT_DIM}" font-family="JetBrains Mono,monospace" '
-            f'font-size="10">{_fmt(yt,0)}</text>'
+        html_labels.append(
+            f'<div class="db-lbl axis-y" style="left:{_pct(x0, W)};'
+            f'top:{_pct(gy, H)};">{_fmt(yt,0)}</div>'
         )
 
     # X ticks — one per iteration (cap to reasonable number)
     unique_iters = sorted(set(iters))
     if len(unique_iters) > 12:
-        # subsample
         step = max(1, len(unique_iters) // 10)
         unique_iters = unique_iters[::step] + [unique_iters[-1]]
     xticks_svg = []
@@ -378,31 +402,37 @@ def _panel_tflops(state: dict) -> str:
         xticks_svg.append(
             f'<line x1="{gx:.2f}" y1="{y1}" x2="{gx:.2f}" y2="{y1+4}" '
             f'stroke="{C_SLATE}" stroke-width="1" />'
-            f'<text x="{gx:.2f}" y="{y1+16}" text-anchor="middle" '
-            f'fill="{C_PARCHMENT_DIM}" font-family="JetBrains Mono,monospace" '
-            f'font-size="10">{xi}</text>'
+        )
+        html_labels.append(
+            f'<div class="db-lbl axis-x" style="left:{_pct(gx, W)};'
+            f'top:{_pct(y1+6, H)};">{xi}</div>'
         )
 
-    # Target line (saffron dashed)
+    # Target line (saffron dashed) + HTML label
     target_line = ""
     if target_tf >= y_lo and target_tf <= y_hi:
         ty = sy(target_tf)
         target_line = (
             f'<line x1="{x0}" y1="{ty:.2f}" x2="{x1}" y2="{ty:.2f}" '
             f'stroke="{C_SAFFRON}" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.85" />'
-            f'<text x="{x1-4}" y="{ty-4:.2f}" text-anchor="end" fill="{C_SAFFRON}" '
-            f'font-family="Inter,sans-serif" font-size="10">target {_fmt(target_pct,0)}% · {_fmt(target_tf,0)} TFLOPS</text>'
+        )
+        html_labels.append(
+            f'<div class="db-lbl inline-r font-sans saffron" '
+            f'style="left:{_pct(x1, W)};top:{_pct(ty, H)};">'
+            f'target {_fmt(target_pct,0)}% · {_fmt(target_tf,0)} TFLOPS</div>'
         )
 
-    # Peak line (parchment dim dashed)
+    # Peak line (parchment dim dashed) + HTML label
     peak_line = ""
     if A100_PEAK_TFLOPS <= y_hi:
         py = sy(A100_PEAK_TFLOPS)
         peak_line = (
             f'<line x1="{x0}" y1="{py:.2f}" x2="{x1}" y2="{py:.2f}" '
             f'stroke="{C_PARCHMENT_DIM}" stroke-width="1" stroke-dasharray="2 4" opacity="0.4" />'
-            f'<text x="{x1-4}" y="{py-4:.2f}" text-anchor="end" fill="{C_PARCHMENT_DIM}" '
-            f'font-family="Inter,sans-serif" font-size="10" opacity="0.8">A100 peak · 312</text>'
+        )
+        html_labels.append(
+            f'<div class="db-lbl inline-r font-sans parch-dim" '
+            f'style="left:{_pct(x1, W)};top:{_pct(py, H)};">A100 peak · 312</div>'
         )
 
     # Build line / area
@@ -435,19 +465,21 @@ def _panel_tflops(state: dict) -> str:
              f'stroke="{C_STEEL_2}" stroke-width="1.2"/>')
 
     svg = f"""
-    <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg db-tflops-svg"
-         role="img" aria-label="TFLOPS progression chart">
-      {band_svg}
-      {''.join(grid)}
-      {frame}
-      {area}
-      {line}
-      {''.join(dots)}
-      {target_line}
-      {peak_line}
-      {''.join(tick_labels)}
-      {''.join(xticks_svg)}
-    </svg>
+    <div class="db-chart tflops">
+      <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg"
+           role="img" aria-label="TFLOPS progression chart">
+        {band_svg}
+        {''.join(grid)}
+        {frame}
+        {area}
+        {line}
+        {''.join(dots)}
+        {target_line}
+        {peak_line}
+        {''.join(xticks_svg)}
+      </svg>
+      {''.join(html_labels)}
+    </div>
     """
 
     return f"""
@@ -466,7 +498,7 @@ def _panel_tflops(state: dict) -> str:
 def _panel_roofline(state: dict) -> str:
     events = _metrics_events(state)
 
-    W, H = 640, 300
+    W, H = 640, 360
     MX_L, MX_R, MY_T, MY_B = 54, 14, 16, 36
     x0, x1 = MX_L, W - MX_R
     y0, y1 = MY_T, H - MY_B
@@ -491,11 +523,12 @@ def _panel_roofline(state: dict) -> str:
         f'fill="{C_BASIL}" opacity="0.08" />'
     )
 
-    # Grid (powers of 10)
+    # Grid (powers of 10) — lines only, labels are HTML overlays
     grid_svg = []
-    xtick_labels = []
-    ytick_labels = []
-    # X powers: -1..4
+    html_labels: List[str] = []
+    def _pct(coord: float, dim: float) -> str:
+        return f"{coord / dim * 100:.3f}%"
+
     for p in range(-1, 5):
         v = 10 ** p
         if v < X_MIN or v > X_MAX:
@@ -505,12 +538,14 @@ def _panel_roofline(state: dict) -> str:
             f'<line x1="{gx:.2f}" y1="{y0}" x2="{gx:.2f}" y2="{y1}" '
             f'stroke="{C_STEEL_2}" stroke-width="1" opacity="0.7"/>'
         )
-        label = f"10^{p}" if p < 0 or p > 3 else f"{int(v)}"
-        xtick_labels.append(
-            f'<text x="{gx:.2f}" y="{y1+14}" text-anchor="middle" fill="{C_PARCHMENT_DIM}" '
-            f'font-family="JetBrains Mono,monospace" font-size="10">{label}</text>'
+        if p < 0 or p > 3:
+            label = f"10<sup>{p}</sup>"
+        else:
+            label = f"{int(v)}"
+        html_labels.append(
+            f'<div class="db-lbl axis-x" style="left:{_pct(gx, W)};'
+            f'top:{_pct(y1+6, H)};">{label}</div>'
         )
-    # Y powers: -1..2 (approx up to 400)
     for p in range(-1, 3):
         v = 10 ** p
         if v < Y_MIN or v > Y_MAX:
@@ -520,10 +555,13 @@ def _panel_roofline(state: dict) -> str:
             f'<line x1="{x0}" y1="{gy:.2f}" x2="{x1}" y2="{gy:.2f}" '
             f'stroke="{C_STEEL_2}" stroke-width="1" opacity="0.7"/>'
         )
-        label = f"10^{p}" if p < 0 or p > 2 else f"{int(v)}"
-        ytick_labels.append(
-            f'<text x="{x0-6}" y="{gy+3.5:.2f}" text-anchor="end" fill="{C_PARCHMENT_DIM}" '
-            f'font-family="JetBrains Mono,monospace" font-size="10">{label}</text>'
+        if p < 0 or p > 2:
+            label = f"10<sup>{p}</sup>"
+        else:
+            label = f"{int(v)}"
+        html_labels.append(
+            f'<div class="db-lbl axis-y" style="left:{_pct(x0, W)};'
+            f'top:{_pct(gy, H)};">{label}</div>'
         )
 
     # Roofline — sample many x in log space, y = min(312, 2x)
@@ -539,36 +577,41 @@ def _panel_roofline(state: dict) -> str:
     roof_line = (f'<polyline points="{_points_str(samples)}" fill="none" '
                  f'stroke="{C_PARCHMENT}" stroke-width="1.8" opacity="0.9" />')
 
-    # Ridge vertical dashed
+    # Ridge vertical dashed + HTML label
     ridge_top = sy(A100_PEAK_TFLOPS)
     ridge_svg = (
         f'<line x1="{ridge_x:.2f}" y1="{y0}" x2="{ridge_x:.2f}" y2="{y1}" '
         f'stroke="{C_PARCHMENT_DIM}" stroke-width="1" stroke-dasharray="3 4" opacity="0.6"/>'
-        f'<text x="{ridge_x+6:.2f}" y="{ridge_top+12:.2f}" fill="{C_PARCHMENT_DIM}" '
-        f'font-family="Inter,sans-serif" font-size="10">ridge point (156 FLOP/byte)</text>'
     )
-
-    # Axis labels
-    axis_labels = (
-        f'<text x="{(x0+x1)/2:.1f}" y="{H-4}" text-anchor="middle" fill="{C_PARCHMENT_DIM}" '
-        f'font-family="Inter,sans-serif" font-size="11">Arithmetic Intensity (FLOP/byte)</text>'
-        f'<text x="12" y="{(y0+y1)/2:.1f}" text-anchor="middle" fill="{C_PARCHMENT_DIM}" '
-        f'font-family="Inter,sans-serif" font-size="11" '
-        f'transform="rotate(-90 12 {(y0+y1)/2:.1f})">TFLOPS</text>'
+    html_labels.append(
+        f'<div class="db-lbl font-sans parch-dim" style="left:{_pct(ridge_x+6, W)};'
+        f'top:{_pct(ridge_top+10, H)};transform:none;">ridge point (156 FLOP/byte)</div>'
     )
+    # Axis titles (absolute-positioned inside chart wrap)
+    html_labels.append(
+        f'<div class="db-lbl font-sans parch-dim" style="left:50%;bottom:2px;top:auto;'
+        f'transform:translateX(-50%);font-size:12px;">Arithmetic Intensity (FLOP/byte)</div>'
+    )
+    html_labels.append(
+        f'<div class="db-lbl font-sans parch-dim" style="left:0;top:50%;'
+        f'transform:rotate(-90deg) translateX(50%);transform-origin:left center;'
+        f'font-size:12px;">TFLOPS</div>'
+    )
+    axis_labels = ""  # moved to HTML overlay
 
     # Points
     if not events:
         body_svg = f"""
-        <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg db-roofline-svg"
-             role="img" aria-label="Empty roofline chart">
-          {mem_shade}{cmp_shade}
-          {''.join(grid_svg)}
-          {roof_line}
-          {ridge_svg}
-          {''.join(xtick_labels)}{''.join(ytick_labels)}
-          {axis_labels}
-        </svg>
+        <div class="db-chart roofline">
+          <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg"
+               role="img" aria-label="Empty roofline chart">
+            {mem_shade}{cmp_shade}
+            {''.join(grid_svg)}
+            {roof_line}
+            {ridge_svg}
+          </svg>
+          {''.join(html_labels)}
+        </div>
         <div class="db-empty" style="margin-top:8px;">awaiting first profile</div>
         """
         return f"""
@@ -620,17 +663,18 @@ def _panel_roofline(state: dict) -> str:
                 f'stroke-dasharray="2 3" />')
 
     svg = f"""
-    <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg db-roofline-svg"
-         role="img" aria-label="Roofline chart">
-      {mem_shade}{cmp_shade}
-      {''.join(grid_svg)}
-      {roof_line}
-      {ridge_svg}
-      {traj}
-      {''.join(scatter_svg)}
-      {''.join(xtick_labels)}{''.join(ytick_labels)}
-      {axis_labels}
-    </svg>
+    <div class="db-chart roofline">
+      <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg"
+           role="img" aria-label="Roofline chart">
+        {mem_shade}{cmp_shade}
+        {''.join(grid_svg)}
+        {roof_line}
+        {ridge_svg}
+        {traj}
+        {''.join(scatter_svg)}
+      </svg>
+      {''.join(html_labels)}
+    </div>
     """
 
     return f"""
@@ -808,9 +852,17 @@ def _panel_registers(state: dict) -> str:
         km = d.get("kernel_metadata") or []
         if not km or not isinstance(km, list):
             continue
-        first = km[0] if isinstance(km[0], dict) else {}
-        regs = first.get("registers")
-        spills = first.get("spills")
+        # pick the hottest kernel variant (highest reg count) so we track the
+        # real bottleneck, matching how _estimate_occupancy chooses its "hot" one.
+        def _reg_of(k):
+            if not isinstance(k, dict):
+                return -1
+            return (k.get("n_regs") or k.get("registers") or 0)
+        hot = max((k for k in km if isinstance(k, dict)), key=_reg_of, default=None)
+        if not hot:
+            continue
+        regs = hot.get("n_regs", hot.get("registers"))
+        spills = hot.get("n_spills", hot.get("spills"))
         series.append((int(it) if it is not None else 0, regs, spills))
 
     if not series or all(r is None for _, r, _ in series):
@@ -822,7 +874,7 @@ def _panel_registers(state: dict) -> str:
         </div>
         """
 
-    W, H = 640, 120
+    W, H = 640, 160
     MX_L, MX_R, MY_T, MY_B = 34, 48, 10, 20
     x0, x1 = MX_L, W - MX_R
     y0, y1 = MY_T, H - MY_B
@@ -891,29 +943,29 @@ def _panel_registers(state: dict) -> str:
             for px, py in sp_pts
         )
 
-    # Y-axis labels (left=registers)
-    y_labels = [
-        f'<text x="{x0-4}" y="{sy_r(r_hi)+3:.2f}" text-anchor="end" fill="{C_COPPER}" '
-        f'font-family="JetBrains Mono,monospace" font-size="9">{_fmt(r_hi,0)}</text>',
-        f'<text x="{x0-4}" y="{sy_r(r_lo)+3:.2f}" text-anchor="end" fill="{C_COPPER}" '
-        f'font-family="JetBrains Mono,monospace" font-size="9">0</text>',
+    # Y-axis labels — HTML overlays so they don't distort with stretched SVG
+    def _pct(c: float, dim: float) -> str:
+        return f"{c / dim * 100:.3f}%"
+    html_labels: List[str] = [
+        f'<div class="db-lbl axis-y copper" style="left:{_pct(x0, W)};top:{_pct(sy_r(r_hi), H)};">{_fmt(r_hi,0)}</div>',
+        f'<div class="db-lbl axis-y copper" style="left:{_pct(x0, W)};top:{_pct(sy_r(r_lo), H)};">0</div>',
     ]
     if has_spills:
-        y_labels += [
-            f'<text x="{x1+4}" y="{sy_s(s_hi)+3:.2f}" text-anchor="start" fill="{C_BORDEAUX}" '
-            f'font-family="JetBrains Mono,monospace" font-size="9">{_fmt(s_hi,0)}</text>',
-            f'<text x="{x1+4}" y="{sy_s(s_lo)+3:.2f}" text-anchor="start" fill="{C_BORDEAUX}" '
-            f'font-family="JetBrains Mono,monospace" font-size="9">0</text>',
+        html_labels += [
+            f'<div class="db-lbl axis-y2 bordeaux" style="left:{_pct(x1, W)};top:{_pct(sy_s(s_hi), H)};">{_fmt(s_hi,0)}</div>',
+            f'<div class="db-lbl axis-y2 bordeaux" style="left:{_pct(x1, W)};top:{_pct(sy_s(s_lo), H)};">0</div>',
         ]
 
     svg = f"""
-    <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg db-spark-svg"
-         role="img" aria-label="Registers and spills trend">
-      {frame}
-      {reg_line}{reg_dots}
-      {spill_line}{spill_dots}
-      {''.join(y_labels)}
-    </svg>
+    <div class="db-chart spark">
+      <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="db-svg"
+           role="img" aria-label="Registers and spills trend">
+        {frame}
+        {reg_line}{reg_dots}
+        {spill_line}{spill_dots}
+      </svg>
+      {''.join(html_labels)}
+    </div>
     """
 
     latest_reg = next((r for _, r, _ in reversed(series) if r is not None), None)
