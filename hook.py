@@ -65,12 +65,15 @@ def _triton_sdpa(
     B, H_q, N, D = query.shape
     H_kv = key.shape[1]
 
-    # Only handle fp16, supported head dims, no attention mask, no dropout
+    # Only handle prefill (N >= 64): decode steps (N=1) are handled by PyTorch SDPA
+    # which has a far more efficient path for single-token queries against a KV cache.
+    # Also restrict to fp16, supported head dims, no attention mask, no dropout.
     if (
         query.dtype != torch.float16
         or D not in (64, 128)
         or dropout_p > 0.0
         or attn_mask is not None
+        or N < 64
         or N > 8192
     ):
         return _original_sdpa(query, key, value, attn_mask, dropout_p, is_causal, scale)

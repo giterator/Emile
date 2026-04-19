@@ -558,8 +558,8 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
     # ── Phase 2: Triton-patched (streaming) ────────────────────────────────
     yield {"phase": "triton_start"}
     try:
-        # Compile the agent's kernel directly in this container and patch F.sdpa.
-        # GQA expansion (Qwen3 32 Q heads / 8 KV heads) is handled in the hook below.
+        import queue as _queue
+
         _original_sdpa = F.scaled_dot_product_attention
         patched = False
 
@@ -569,69 +569,141 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
                 _triton_attn = getattr(_mod, "attention_kernel", None)
 
                 if _triton_attn is not None:
+                    # Warmup: compile BOTH the non-causal and causal kernel variants
+                    # before the generation thread starts.
+                    #
+                    # Triton JIT compiles a separate binary for each unique combination
+                    # of constexpr arguments (STAGE, BLOCK_M, BLOCK_N, HEAD_DIM, ...).
+                    # is_causal=True maps to a different STAGE value, so it needs its
+                    # own compiled binary.  Qwen3 uses causal attention for every layer,
+                    # so if we only warm up is_causal=False the causal binary gets
+                    # compiled inside model.generate() on the background thread.  If
+                    # that compilation or the resulting kernel fails, the thread dies
+                    # silently and TextIteratorStreamer waits until the 60-s timeout.
+                    #
+                    # Warming up both variants here ensures any compilation failure is
+                    # caught as a Python exception before the generation thread starts.
+                    try:
+                        _wq = torch.randn(1, 1, 128, 128, device="cuda", dtype=torch.float16)
+                        _triton_attn(_wq, _wq, _wq, is_causal=False)
+                        _triton_attn(_wq, _wq, _wq, is_causal=True)
+                        torch.cuda.synchronize()
+                        print("[triton] Kernel warmup OK (causal + non-causal)")
+                        del _wq
+                    except Exception as warmup_err:
+                        print(f"[warn] Kernel warmup failed — will not patch SDPA: {warmup_err}")
+                        _triton_attn = None
+
+                if _triton_attn is not None:
+                    # _hook_failed: disables kernel after first error to prevent
+                    # repeated CUDA error cascades corrupting the context.
+                    # _hook_calls: used to synchronize exactly once after the very
+                    # first real Triton call, turning any delayed CUDA error into a
+                    # catchable Python exception before it can corrupt subsequent ops.
+                    _hook_failed = [False]
+                    _hook_calls  = [0]
+
                     def _sdpa_hook(query, key, value, attn_mask=None,
                                    dropout_p=0.0, is_causal=False, scale=None):
                         B, H_q, N, D = query.shape
                         H_kv = key.shape[1]
-                        # Only intercept fp16, supported dims, no mask/dropout.
-                        # Intercept fp16, supported head dims, no attn_mask/dropout.
-                        # is_causal is passed through to the kernel (V2+ supports it).
-                        if (query.dtype != torch.float16 or D not in (64, 128)
-                                or dropout_p > 0 or attn_mask is not None
+                        # Only intercept prefill (N >= 64): decode steps (N=1) fall
+                        # back to PyTorch SDPA which is more efficient for single-token
+                        # queries against a KV cache. Also restrict to fp16, supported
+                        # head dims, no attn_mask/dropout. Disabled after first error.
+                        if (_hook_failed[0]
+                                or query.dtype != torch.float16
+                                or D not in (64, 128)
+                                or dropout_p > 0
+                                or attn_mask is not None
+                                or N < 64
                                 or N > 8192):
                             return _original_sdpa(query, key, value, attn_mask,
                                                   dropout_p, is_causal, scale)
-                        # GQA expansion
+                        # GQA expansion: repeat KV heads to match Q heads
                         if H_kv != H_q:
                             n_rep = H_q // H_kv
                             key   = key.repeat_interleave(n_rep, dim=1)
                             value = value.repeat_interleave(n_rep, dim=1)
                         try:
-                            return _triton_attn(query, key, value,
-                                                is_causal=is_causal, scale=scale)
-                        except Exception:
+                            result = _triton_attn(query, key, value,
+                                                  is_causal=is_causal, scale=scale)
+                            # Synchronize once after the very first Triton call so
+                            # any delayed CUDA error (illegal memory access, etc.)
+                            # surfaces as a Python exception here rather than
+                            # corrupting the CUDA context for subsequent operations.
+                            if _hook_calls[0] == 0:
+                                torch.cuda.synchronize()
+                            _hook_calls[0] += 1
+                            return result
+                        except Exception as hook_err:
+                            print(f"[warn] Triton hook error — disabling for this run: {hook_err}")
+                            _hook_failed[0] = True
                             return _original_sdpa(query, key, value, attn_mask,
                                                   dropout_p, is_causal, scale)
 
                     F.scaled_dot_product_attention = _sdpa_hook
                     patched = True
             except Exception as e:
-                print(f"[warn] Kernel exec failed, falling back to SDPA: {e}")
+                print(f"[warn] Kernel import failed, falling back to SDPA: {e}")
 
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        thread   = Thread(
+        # timeout=60: if the generation thread dies without signalling the streamer
+        # (e.g. CUDA context corrupted by a kernel error), the for-loop raises
+        # queue.Empty instead of blocking forever.
+        streamer = TextIteratorStreamer(
+            tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=60.0
+        )
+        # daemon=True: if the thread hangs (Triton deadlock), it won't prevent
+        # the Modal container from exiting and returning an error to the client.
+        thread = Thread(
             target=model.generate,
             kwargs={**gen_kwargs, "streamer": streamer},
+            daemon=True,
         )
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         thread.start()
 
-        token_count   = 0
+        token_count    = 0
         triton_ttft_ms = None
-        for token_text in streamer:
-            if triton_ttft_ms is None:
-                triton_ttft_ms = (time.perf_counter() - t0) * 1000
-            token_count += 1
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            tps = token_count / (elapsed_ms / 1000) if elapsed_ms > 0 else 0
-            yield {
-                "phase":          "triton_token",
-                "token":          token_text,
-                "tokens_per_sec": round(tps, 1),
-                "elapsed_ms":     round(elapsed_ms, 1),
-            }
-
-        thread.join()
-        torch.cuda.synchronize()
-        total_ms  = (time.perf_counter() - t0) * 1000
-        final_tps = token_count / (total_ms / 1000)
-
-        print(f"[triton] ttft={triton_ttft_ms:.1f}ms total={total_ms:.1f}ms tps={final_tps:.1f}")
+        timed_out      = False
+        try:
+            for token_text in streamer:
+                if triton_ttft_ms is None:
+                    triton_ttft_ms = (time.perf_counter() - t0) * 1000
+                token_count += 1
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                tps = token_count / (elapsed_ms / 1000) if elapsed_ms > 0 else 0
+                yield {
+                    "phase":          "triton_token",
+                    "token":          token_text,
+                    "tokens_per_sec": round(tps, 1),
+                    "elapsed_ms":     round(elapsed_ms, 1),
+                }
+        except _queue.Empty:
+            timed_out = True
+            print("[triton] Streamer timed out — generation thread likely hung or crashed.")
 
         if patched:
             F.scaled_dot_product_attention = _original_sdpa
+
+        if timed_out:
+            yield {
+                "phase":   "error",
+                "message": (
+                    "Triton generation timed out after 60 s. The kernel may be hanging "
+                    "on this model's attention shapes. Partial output discarded."
+                ),
+            }
+            return
+
+        thread.join(timeout=5)
+        torch.cuda.synchronize()
+        total_ms  = (time.perf_counter() - t0) * 1000
+        final_tps = token_count / (total_ms / 1000) if total_ms > 0 else 0
+
+        print(f"[triton] ttft={triton_ttft_ms:.1f}ms total={total_ms:.1f}ms tps={final_tps:.1f}")
 
         yield {
             "phase":          "triton_done",
@@ -639,9 +711,11 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
             "time_ms":        round(total_ms, 1),
             "ttft_ms":        round(triton_ttft_ms or 0, 1),
             "token_count":    token_count,
-            "speedup":        round(final_tps / baseline_tps, 2),
+            "speedup":        round(final_tps / baseline_tps, 2) if baseline_tps > 0 else 1.0,
             "ttft_speedup":   round((baseline_ttft_ms or 1) / (triton_ttft_ms or 1), 2),
         }
 
     except Exception as e:
+        if patched:
+            F.scaled_dot_product_attention = _original_sdpa
         yield {"phase": "error", "message": f"Triton inference failed: {e}"}
