@@ -1,7 +1,7 @@
 """
 Streamlit UI — two-tab interface:
   Tab 1 · Agent  : live optimization loop with thought stream + metrics chart
-  Tab 2 · Demo   : side-by-side Qwen3-0.6B inference race (baseline vs Triton)
+  Tab 2 · Demo   : side-by-side Qwen3-4B inference race (baseline vs Triton)
 
 Run with:
     streamlit run ui/app.py
@@ -267,7 +267,7 @@ def attention_kernel(
 st.markdown(
     "## ⚡ GPU Kernel Optimization Agent  "
     "<span style='font-size:0.55em;color:#6c7086;font-weight:400'>"
-    "Qwen3-0.6B · A100-80GB · PyTorch reference baseline + LLM agent</span>",
+    "Qwen3-4B · A100-80GB · PyTorch reference baseline + LLM agent</span>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -300,7 +300,7 @@ with tab_agent:
         st.markdown("#### Benchmark Config")
         seq_len = st.selectbox("Sequence length", [512, 1024, 2048, 4096], index=2)
         d_head  = st.selectbox("Head dimension",  [64, 128], index=1)
-        n_heads = st.selectbox("Query heads",     [8, 16, 32], index=1)
+        n_heads = st.selectbox("Query heads",     [8, 16, 32], index=2)
         batch   = st.slider("Batch size", 1, 8, 1)
 
         target_pct = st.slider(
@@ -449,7 +449,7 @@ with tab_agent:
 # ============================================================================
 
 with tab_demo:
-    st.markdown("#### Side-by-side Qwen3-0.6B Inference")
+    st.markdown("#### Side-by-side Qwen3-4B Inference")
     st.caption(
         "Baseline uses naive PyTorch · Optimized uses the Triton kernel below · "
         "Same prompt, same model weights, same A100."
@@ -652,7 +652,7 @@ with tab_demo:
         )
 
         status_ph.markdown(
-            "<div class='metric-box' style='text-align:center'>🔄 Loading model...</div>",
+            "<div class='metric-box' style='text-align:center'>🔄 Loading Qwen3-4B...</div>",
             unsafe_allow_html=True,
         )
         base_speed_ph.markdown(
@@ -669,7 +669,7 @@ with tab_demo:
 
             if phase == "loading":
                 status_ph.markdown(
-                    "<div class='metric-box' style='text-align:center'>🔄 Loading model...</div>",
+                    "<div class='metric-box' style='text-align:center'>🔄 Loading Qwen3-4B...</div>",
                     unsafe_allow_html=True,
                 )
 

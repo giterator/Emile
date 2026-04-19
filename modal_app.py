@@ -100,7 +100,7 @@ gpu_image = (
     )
 )
 
-MODEL_ID = "Qwen/Qwen3-0.6B"
+MODEL_ID = "Qwen/Qwen3-4B"
 
 # A100 hardware constants used for roofline analysis
 A100_PEAK_TFLOPS_FP16 = 312.0   # Tensor Core FP16
@@ -471,7 +471,7 @@ def get_kernel_metadata(kernel_code: str, d_head: int = 128) -> dict:
 )
 def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int = 150, context_tokens: int = 1024):
     """
-    Side-by-side Qwen3 inference race.
+    Side-by-side Qwen3-4B inference race.
 
     Records two full generations on the GPU (sequential, so timings are honest):
       1. Baseline  - model loaded with attn_implementation="eager" (naive
@@ -527,7 +527,7 @@ def run_inference_comparison(prompt: str, kernel_code: str, max_new_tokens: int 
         yield {"phase": "error", "message": f"Model load failed: {e}"}
         return
 
-    # ── Record two generations (baseline + Triton) ─────────────────────────
+    # ── Record two Qwen3-4B generations (baseline + Triton) ─────────────────
     # Both runs share the SAME prompt, model weights, and seed so output tokens
     # are identical -- only per-token latency differs. The recordings get sent
     # to the UI which replays both simultaneously so the user visually sees the
