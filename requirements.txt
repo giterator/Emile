@@ -1,0 +1,6 @@
+# Local dependencies only — torch/triton/transformers run inside the Modal container
+openai>=1.30.0
+modal>=0.62.0
+streamlit>=1.31.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
